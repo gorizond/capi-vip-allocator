@@ -1,0 +1,60 @@
+run:
+  go: "1.22"
+  timeout: 10m
+  tests: true
+
+output:
+  sort-results: true
+
+linters:
+  enable:
+    - asciicheck
+    - errcheck
+    - exportloopref
+    - gocritic
+    - gofmt
+    - goimports
+    - gosimple
+    - govet
+    - ineffassign
+    - misspell
+    - nakedret
+    - revive
+    - staticcheck
+    - typecheck
+    - unused
+
+linters-settings:
+  gocritic:
+    settings:
+      rangeValCopy:
+        sizeThreshold: 512
+  gofmt:
+    simplify: true
+  goimports:
+    local-prefixes: github.com/gorizond/capi-vip-allocator
+  misspell:
+    locale: US
+  revive:
+    confidence: 0.8
+    severity: warning
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: early-return
+      - name: errorf
+      - name: error-naming
+      - name: exported
+      - name: if-return
+      - name: increment-decrement
+      - name: indent-error-flow
+      - name: range
+      - name: receiver-naming
+      - name: time-equal
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -1,0 +1,9 @@
+# Ignore build artifacts
+bin/
+out/
+
+# Exclude test binaries
+testbin/
+
+# Exclude VCS metadata
+.git/
