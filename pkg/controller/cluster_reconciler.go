@@ -19,15 +19,16 @@ import (
 )
 
 const (
-	controlPlaneRole    = "control-plane"
-	clusterClassLabel   = "vip.capi.gorizond.io/cluster-class"
-	roleLabel           = "vip.capi.gorizond.io/role"
-	ipamGroup           = "ipam.cluster.x-k8s.io"
-	ipamVersion         = "v1alpha2"
-	globalPoolKind      = "GlobalInClusterIPPool"
-	ipAddressClaimKind  = "IPAddressClaim"
-	ipAddressKind       = "IPAddress"
-	defaultRequeueDelay = 10 * time.Second
+	controlPlaneRole     = "control-plane"
+	clusterClassLabel    = "vip.capi.gorizond.io/cluster-class"
+	roleLabel            = "vip.capi.gorizond.io/role"
+	ipamGroup            = "ipam.cluster.x-k8s.io"
+	ipamVersion          = "v1beta1"  // for IPAddressClaim and IPAddress
+	globalPoolAPIVersion = "v1alpha2" // for GlobalInClusterIPPool
+	globalPoolKind       = "GlobalInClusterIPPool"
+	ipAddressClaimKind   = "IPAddressClaim"
+	ipAddressKind        = "IPAddress"
+	defaultRequeueDelay  = 10 * time.Second
 )
 
 // ClusterReconciler reconciles Cluster resources to ensure a control-plane VIP is allocated.
@@ -129,7 +130,7 @@ func (r *ClusterReconciler) ensureClaim(ctx context.Context, cluster *clusterv1.
 	claim.SetOwnerReferences([]metav1.OwnerReference{*ownerRef})
 
 	if err := unstructured.SetNestedField(claim.Object, map[string]interface{}{
-		"apiVersion": fmt.Sprintf("%s/%s", ipamGroup, ipamVersion),
+		"apiVersion": fmt.Sprintf("%s/%s", ipamGroup, globalPoolAPIVersion),
 		"kind":       globalPoolKind,
 		"name":       poolName,
 	}, "spec", "poolRef"); err != nil {
@@ -144,7 +145,7 @@ func (r *ClusterReconciler) ensureClaim(ctx context.Context, cluster *clusterv1.
 }
 
 func (r *ClusterReconciler) findPool(ctx context.Context, className, role string) (string, error) {
-	poolListGVK := schema.GroupVersionKind{Group: ipamGroup, Version: ipamVersion, Kind: globalPoolKind + "List"}
+	poolListGVK := schema.GroupVersionKind{Group: ipamGroup, Version: globalPoolAPIVersion, Kind: globalPoolKind + "List"}
 	pools := &unstructured.UnstructuredList{}
 	pools.SetGroupVersionKind(poolListGVK)
 
