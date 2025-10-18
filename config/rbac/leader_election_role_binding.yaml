@@ -9,4 +9,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: capi-vip-allocator-controller-manager
-    namespace: capi-vip-allocator-system
+    namespace: capi-system
