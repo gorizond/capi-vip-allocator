@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: capi-vip-allocator-runtime-extension
+  namespace: capi-system
+  labels:
+    cluster.x-k8s.io/provider: vip-allocator
+spec:
+  type: ClusterIP
+  ports:
+    - name: runtime-extension
+      port: 443
+      targetPort: runtime-ext
+      protocol: TCP
+  selector:
+    control-plane: capi-vip-allocator-controller-manager
+

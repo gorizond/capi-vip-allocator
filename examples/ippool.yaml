@@ -1,0 +1,33 @@
+# Example: GlobalInClusterIPPool for control-plane VIPs
+#
+# This pool will be used by capi-vip-allocator to allocate VIPs for clusters
+# with clusterClass = "my-cluster-class"
+#
+apiVersion: ipam.cluster.x-k8s.io/v1alpha2
+kind: GlobalInClusterIPPool
+metadata:
+  name: control-plane-vip-pool
+  labels:
+    # REQUIRED: Match your cluster class name
+    vip.capi.gorizond.io/cluster-class: my-cluster-class
+    # REQUIRED: Specify role
+    vip.capi.gorizond.io/role: control-plane
+spec:
+  addresses:
+    - "10.0.0.10-10.0.0.20"
+  gateway: "10.0.0.1"
+  prefix: 24
+---
+# Optional: Separate pool for ingress VIPs (future feature)
+apiVersion: ipam.cluster.x-k8s.io/v1alpha2
+kind: GlobalInClusterIPPool
+metadata:
+  name: ingress-vip-pool
+  labels:
+    vip.capi.gorizond.io/cluster-class: my-cluster-class
+    vip.capi.gorizond.io/role: ingress
+spec:
+  addresses:
+    - "10.0.1.10-10.0.1.20"
+  gateway: "10.0.0.1"
+  prefix: 24

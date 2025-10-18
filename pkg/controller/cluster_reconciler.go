@@ -8,6 +8,7 @@ import (
 	"github.com/go-logr/logr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -200,9 +201,31 @@ func (r *ClusterReconciler) resolveIPAddress(ctx context.Context, namespace stri
 func (r *ClusterReconciler) patchClusterEndpoint(ctx context.Context, cluster *clusterv1.Cluster, ip string) error {
 	patchHelper := client.MergeFrom(cluster.DeepCopy())
 
+	// Set the controlPlaneEndpoint directly
 	cluster.Spec.ControlPlaneEndpoint.Host = ip
 	if cluster.Spec.ControlPlaneEndpoint.Port == 0 {
 		cluster.Spec.ControlPlaneEndpoint.Port = r.DefaultPort
+	}
+
+	// Also set/update the clusterVip variable in topology if topology exists
+	if cluster.Spec.Topology != nil {
+		// Find existing clusterVip variable
+		found := false
+		for i := range cluster.Spec.Topology.Variables {
+			if cluster.Spec.Topology.Variables[i].Name == "clusterVip" {
+				cluster.Spec.Topology.Variables[i].Value.Raw = []byte(fmt.Sprintf("%q", ip))
+				found = true
+				break
+			}
+		}
+
+		// If not found, append new variable
+		if !found {
+			cluster.Spec.Topology.Variables = append(cluster.Spec.Topology.Variables, clusterv1.ClusterVariable{
+				Name:  "clusterVip",
+				Value: apiextensionsv1.JSON{Raw: []byte(fmt.Sprintf("%q", ip))},
+			})
+		}
 	}
 
 	if err := r.Client.Patch(ctx, cluster, patchHelper); err != nil {

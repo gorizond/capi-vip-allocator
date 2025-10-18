@@ -1,0 +1,30 @@
+# Example: Cluster with automatic VIP allocation via Runtime Extension
+#
+# This cluster will get controlPlaneEndpoint.host automatically allocated
+# from the IP pool matching the cluster class.
+#
+# Prerequisites:
+# - RuntimeSDK=true in CAPI
+# - capi-vip-allocator v0.1.0+ installed with Runtime Extension enabled
+# - GlobalInClusterIPPool with labels:
+#     vip.capi.gorizond.io/cluster-class: my-cluster-class
+#     vip.capi.gorizond.io/role: control-plane
+#
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: example-cluster
+  namespace: default
+spec:
+  topology:
+    class: my-cluster-class
+    version: v1.30.0
+    controlPlane:
+      replicas: 3
+    workers:
+      machineDeployments:
+        - class: default-worker
+          name: workers
+          replicas: 2
+    # NOTE: controlPlaneEndpoint.host is NOT specified
+    # It will be allocated automatically from the IP pool!

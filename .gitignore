@@ -1,3 +1,4 @@
 bin/
 hack/bin/
 out/
+capi-vip-allocator

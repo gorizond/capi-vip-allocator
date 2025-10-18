@@ -11,6 +11,7 @@ labels:
 resources:
   - ../rbac
   - ../manager
+  - ../runtime
 
 patches:
   - path: manager_image_patch.yaml
