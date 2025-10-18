@@ -116,7 +116,7 @@ $(RELEASE_DIR):
 
 .PHONY: release-manifests
 release-manifests: kustomize | $(RELEASE_DIR) ## Render installation manifests.
-	$(KUSTOMIZE) build config/default > $(RELEASE_DIR)/capi-vip-allocator.yaml
+	$(KUSTOMIZE) build config/default | sed -e "s#$(IMAGE):dev#$(IMAGE):$(TAG)#g" > $(RELEASE_DIR)/capi-vip-allocator.yaml
 
 .PHONY: kustomize
 kustomize: ## Download kustomize locally if necessary.
