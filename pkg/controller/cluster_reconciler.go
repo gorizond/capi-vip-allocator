@@ -130,9 +130,9 @@ func (r *ClusterReconciler) ensureClaim(ctx context.Context, cluster *clusterv1.
 	claim.SetOwnerReferences([]metav1.OwnerReference{*ownerRef})
 
 	if err := unstructured.SetNestedField(claim.Object, map[string]interface{}{
-		"apiVersion": fmt.Sprintf("%s/%s", ipamGroup, globalPoolAPIVersion),
-		"kind":       globalPoolKind,
-		"name":       poolName,
+		"apiGroup": ipamGroup,
+		"kind":     globalPoolKind,
+		"name":     poolName,
 	}, "spec", "poolRef"); err != nil {
 		return nil, fmt.Errorf("set poolRef: %w", err)
 	}
