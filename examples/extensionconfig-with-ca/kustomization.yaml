@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: capi-system
+
+resources:
+  - extensionconfig.yaml
+
+# Note: caBundle will be automatically injected by CAPI controller-manager 
+# mutating webhook when the ExtensionConfig is created, as long as:
+# 1. The Certificate is Ready
+# 2. The Secret with CA exists
+# 3. The annotation cert-manager.io/inject-ca-from is present
+

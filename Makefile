@@ -117,6 +117,9 @@ $(RELEASE_DIR):
 .PHONY: release-manifests
 release-manifests: kustomize | $(RELEASE_DIR) ## Render installation manifests.
 	$(KUSTOMIZE) build config/default | sed -e "s#$(IMAGE):dev#$(IMAGE):$(TAG)#g" > $(RELEASE_DIR)/capi-vip-allocator.yaml
+	# Generate version without ExtensionConfig for two-stage GitOps deployment
+	# Remove last document (ExtensionConfig) by finding line before last '---'
+	head -n $$(grep -n "^---$$" $(RELEASE_DIR)/capi-vip-allocator.yaml | tail -1 | cut -d: -f1 | xargs -I {} expr {} - 1) $(RELEASE_DIR)/capi-vip-allocator.yaml > $(RELEASE_DIR)/capi-vip-allocator-no-extconfig.yaml
 
 .PHONY: kustomize
 kustomize: ## Download kustomize locally if necessary.
