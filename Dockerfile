@@ -10,14 +10,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# global ARGs used in base images
-ARG ARCH
+# syntax=docker/dockerfile:1.7
 
 # Build the manager binary
-FROM golang:1.22 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.22 AS builder
 
-# builder ARGs. No inheritance from global ARGs, so we need to redeclare them.
 ARG ARCH
+ARG TARGETARCH
 ARG ldflags
 
 WORKDIR /workspace
@@ -36,13 +35,13 @@ COPY pkg/ pkg/
 # Build
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 GOOS=linux GOARCH=${ARCH} \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${ARCH:-${TARGETARCH}} \
     go build -trimpath -ldflags "${ldflags} -extldflags '-static'" \
     -o capi-vip-allocator ./cmd/capi-vip-allocator
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot-${ARCH}
+FROM gcr.io/distroless/static:nonroot
 WORKDIR /
 COPY --from=builder /workspace/capi-vip-allocator .
 USER 65532

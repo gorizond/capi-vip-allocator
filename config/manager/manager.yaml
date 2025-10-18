@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: capi-vip-allocator-controller-manager
+  labels:
+    control-plane: capi-vip-allocator-controller-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: capi-vip-allocator-controller-manager
+  template:
+    metadata:
+      labels:
+        control-plane: capi-vip-allocator-controller-manager
+    spec:
+      serviceAccountName: capi-vip-allocator-controller-manager
+      containers:
+        - name: manager
+          image: ghcr.io/gorizond/capi-vip-allocator:dev
+          args:
+            - "--leader-elect"
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          ports:
+            - containerPort: 8080
+              name: metrics
+            - containerPort: 8081
+              name: healthz
+          resources:
+            limits:
+              cpu: 100m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi

@@ -27,6 +27,9 @@ BIN ?= $(BIN_DIR)/$(IMAGE_NAME)
 RELEASE_DIR ?= out
 LD_FLAGS ?= -s -w
 
+HACK_BIN ?= $(shell pwd)/hack/bin
+KUSTOMIZE ?= $(HACK_BIN)/kustomize
+
 .PHONY: all
 all: build
 
@@ -53,8 +56,7 @@ generate: ## Run go generate against code (no-op if not used).
 	go generate ./...
 
 .PHONY: manifests
-manifests: ## Placeholder for manifest generation.
-	@echo "No manifests to generate."
+manifests: release-manifests ## Render installation manifests.
 
 .PHONY: build
 build: fmt vet ## Build the controller binary.
@@ -93,16 +95,30 @@ docker-push-manifest: ## Create and push a multi-arch manifest.
 
 ##@ Release
 
-.PHONY: clean-release
-clean-release: ## Remove release artifacts.
-	rm -rf $(RELEASE_DIR)
-
 .PHONY: release
-release: clean-release ## Build release archives for all supported architectures.
-	mkdir -p $(RELEASE_DIR)
+release: clean-release | $(RELEASE_DIR) ## Build release archives and installation manifests.
 	@for arch in $(ALL_ARCH); do \
 		output="$(IMAGE_NAME)-linux-$${arch}"; \
 		GOOS=linux GOARCH=$${arch} go build -trimpath -ldflags "$(LD_FLAGS)" -o $(RELEASE_DIR)/$${output} ./cmd/capi-vip-allocator; \
 		( cd $(RELEASE_DIR) && tar -czf $${output}.tar.gz $${output} && rm $${output} ); \
 	done
+	$(MAKE) release-manifests
+	cp metadata.yaml $(RELEASE_DIR)/
+	cp clusterctl-settings.json $(RELEASE_DIR)/
 	cd $(RELEASE_DIR) && shasum -a 256 * > checksums.txt
+
+.PHONY: clean-release
+clean-release: ## Remove release artifacts.
+	rm -rf $(RELEASE_DIR)
+
+$(RELEASE_DIR):
+	mkdir -p $(RELEASE_DIR)
+
+.PHONY: release-manifests
+release-manifests: kustomize | $(RELEASE_DIR) ## Render installation manifests.
+	$(KUSTOMIZE) build config/default > $(RELEASE_DIR)/capi-vip-allocator.yaml
+
+.PHONY: kustomize
+kustomize: ## Download kustomize locally if necessary.
+	mkdir -p $(HACK_BIN)
+	env GOBIN=$(HACK_BIN) go install sigs.k8s.io/kustomize/kustomize/v5@v5.4.2

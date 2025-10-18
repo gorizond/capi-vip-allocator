@@ -1,0 +1,7 @@
+{
+  "name": "vip-allocator",
+  "config": {
+    "componentsFile": "capi-vip-allocator.yaml",
+    "nextVersion": "v0.1.0"
+  }
+}

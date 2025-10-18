@@ -7,11 +7,14 @@ on:
 
 permissions:
   contents: write # Allow creating a release.
+  packages: write # Allow publishing container images.
 
 jobs:
   draft_release:
     name: Create Draft Release
     runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/gorizond/capi-vip-allocator
     steps:
       # - name: Set env
       #   run:  echo "RELEASE_TAG=${GITHUB_REF:10}" >> $GITHUB_ENV
@@ -23,6 +26,26 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
       # - name: generate release notes
       #   run: |
       #     make release-notes
