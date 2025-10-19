@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.8] - 2025-10-19
+
+### Fixed
+
+- 🐛 **Critical bug**: Controller now supports namespace-scoped ClusterClass resources
+  - Previously: Controller tried to read ClusterClass as cluster-scoped only
+  - Now: Controller first tries cluster-scoped, then falls back to namespace-scoped
+  - **Impact**: Fixes issue where ClusterClass in namespace (e.g., `clusters-proxmox`) couldn't be read
+  - Error was: `cannot get ClusterClass "rke2-proxmox-class"` - NotFound error
+  - Result: Cluster stuck in Pending state, `spec.controlPlaneEndpoint.host` never set
+
+### Changed
+
+- Updated `getClusterClass()` function with namespace fallback logic
+  - First attempt: cluster-scoped (no namespace)
+  - Second attempt: namespace-scoped (using cluster's namespace)
+  - Better error messages showing both attempts
+- Updated `patchClusterEndpoint()` signature to accept `clusterNamespace` parameter
+- Updated all callers and tests to pass namespace parameter
+
+### Testing
+
+- Added test `TestGetClusterClass_NamespaceScoped` - verifies namespace-scoped ClusterClass can be read
+- Added test `TestGetClusterClass_ClusterScoped` - verifies cluster-scoped ClusterClass still works
+- All existing tests pass with updated function signatures
+
+### Impact
+
+- ✅ Fixes cluster creation when ClusterClass is in a namespace
+- ✅ Maintains backward compatibility with cluster-scoped ClusterClass
+- ✅ RBAC already has correct permissions (ClusterRole can read across namespaces)
+
+---
+
 ## [v0.1.6] - 2025-10-19
 
 ### Fixed

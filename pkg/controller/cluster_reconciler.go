@@ -90,7 +90,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{RequeueAfter: defaultRequeueDelay}, nil
 	}
 
-	if err := r.patchClusterEndpoint(ctx, cluster, ip); err != nil {
+	if err := r.patchClusterEndpoint(ctx, cluster, ip, cluster.Namespace); err != nil {
 		log.Error(err, "patch cluster endpoint")
 		return ctrl.Result{}, err
 	}
@@ -198,7 +198,7 @@ func (r *ClusterReconciler) resolveIPAddress(ctx context.Context, namespace stri
 	return address, true, nil
 }
 
-func (r *ClusterReconciler) patchClusterEndpoint(ctx context.Context, cluster *clusterv1.Cluster, ip string) error {
+func (r *ClusterReconciler) patchClusterEndpoint(ctx context.Context, cluster *clusterv1.Cluster, ip string, clusterNamespace string) error {
 	patchHelper := client.MergeFrom(cluster.DeepCopy())
 
 	// Set the controlPlaneEndpoint directly
@@ -210,7 +210,7 @@ func (r *ClusterReconciler) patchClusterEndpoint(ctx context.Context, cluster *c
 	// Check if ClusterClass defines clusterVip variable (legacy mode)
 	// Only patch topology.variables if the variable is defined in ClusterClass
 	if cluster.Spec.Topology != nil {
-		clusterClass, err := r.getClusterClass(ctx, cluster.Spec.Topology.Class)
+		clusterClass, err := r.getClusterClass(ctx, cluster.Spec.Topology.Class, clusterNamespace)
 		if err != nil {
 			return fmt.Errorf("get ClusterClass: %w", err)
 		}
@@ -247,13 +247,27 @@ func (r *ClusterReconciler) patchClusterEndpoint(ctx context.Context, cluster *c
 }
 
 // getClusterClass fetches the ClusterClass for the given class name.
-func (r *ClusterReconciler) getClusterClass(ctx context.Context, className string) (*clusterv1.ClusterClass, error) {
+// First tries to get it as cluster-scoped, then falls back to namespace-scoped.
+func (r *ClusterReconciler) getClusterClass(ctx context.Context, className string, clusterNamespace string) (*clusterv1.ClusterClass, error) {
 	clusterClass := &clusterv1.ClusterClass{}
+
+	// First try cluster-scoped (without namespace)
 	namespacedName := types.NamespacedName{Name: className}
-	if err := r.Client.Get(ctx, namespacedName, clusterClass); err != nil {
-		return nil, fmt.Errorf("get ClusterClass %q: %w", className, err)
+	err := r.Client.Get(ctx, namespacedName, clusterClass)
+	if err == nil {
+		return clusterClass, nil
 	}
-	return clusterClass, nil
+
+	// If not found, try namespace-scoped (with cluster's namespace)
+	if errors.IsNotFound(err) {
+		namespacedName = types.NamespacedName{Name: className, Namespace: clusterNamespace}
+		if err := r.Client.Get(ctx, namespacedName, clusterClass); err != nil {
+			return nil, fmt.Errorf("get ClusterClass %q (tried both cluster-scoped and namespace %q): %w", className, clusterNamespace, err)
+		}
+		return clusterClass, nil
+	}
+
+	return nil, fmt.Errorf("get ClusterClass %q: %w", className, err)
 }
 
 // hasClusterVipVariable checks if the ClusterClass defines a clusterVip variable.

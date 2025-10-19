@@ -378,7 +378,7 @@ func TestPatchClusterEndpointPreservesExistingPort(t *testing.T) {
 		DefaultPort: 6443,
 	}
 
-	if err := reconciler.patchClusterEndpoint(context.Background(), cluster, "10.1.1.10"); err != nil {
+	if err := reconciler.patchClusterEndpoint(context.Background(), cluster, "10.1.1.10", cluster.Namespace); err != nil {
 		t.Fatalf("patchClusterEndpoint returned error: %v", err)
 	}
 
@@ -488,4 +488,82 @@ func newIPAddress(name, namespace, address string) *unstructured.Unstructured {
 
 func gvString() string {
 	return ipamGroup + "/" + ipamVersion
+}
+
+func TestGetClusterClass_NamespaceScoped(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clusterv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add cluster api scheme: %v", err)
+	}
+
+	// ClusterClass in namespace
+	clusterClass := &clusterv1.ClusterClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rke2-proxmox-class",
+			Namespace: "clusters-proxmox",
+		},
+		Spec: clusterv1.ClusterClassSpec{
+			Variables: []clusterv1.ClusterClassVariable{
+				{Name: "clusterVip"},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(clusterClass).Build()
+	reconciler := &ClusterReconciler{
+		Client: client,
+		Scheme: scheme,
+		Logger: testr.New(t),
+	}
+
+	ctx := context.Background()
+
+	// Test: should find ClusterClass in namespace
+	got, err := reconciler.getClusterClass(ctx, "rke2-proxmox-class", "clusters-proxmox")
+	if err != nil {
+		t.Fatalf("getClusterClass returned error: %v", err)
+	}
+	if got.Name != "rke2-proxmox-class" {
+		t.Fatalf("expected ClusterClass name %q, got %q", "rke2-proxmox-class", got.Name)
+	}
+	if got.Namespace != "clusters-proxmox" {
+		t.Fatalf("expected ClusterClass namespace %q, got %q", "clusters-proxmox", got.Namespace)
+	}
+}
+
+func TestGetClusterClass_ClusterScoped(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clusterv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add cluster api scheme: %v", err)
+	}
+
+	// ClusterClass without namespace (cluster-scoped)
+	clusterClass := &clusterv1.ClusterClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "global-class",
+		},
+		Spec: clusterv1.ClusterClassSpec{
+			Variables: []clusterv1.ClusterClassVariable{
+				{Name: "someVariable"},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(clusterClass).Build()
+	reconciler := &ClusterReconciler{
+		Client: client,
+		Scheme: scheme,
+		Logger: testr.New(t),
+	}
+
+	ctx := context.Background()
+
+	// Test: should find cluster-scoped ClusterClass
+	got, err := reconciler.getClusterClass(ctx, "global-class", "any-namespace")
+	if err != nil {
+		t.Fatalf("getClusterClass returned error: %v", err)
+	}
+	if got.Name != "global-class" {
+		t.Fatalf("expected ClusterClass name %q, got %q", "global-class", got.Name)
+	}
 }
