@@ -207,25 +207,36 @@ func (r *ClusterReconciler) patchClusterEndpoint(ctx context.Context, cluster *c
 		cluster.Spec.ControlPlaneEndpoint.Port = r.DefaultPort
 	}
 
-	// Also set/update the clusterVip variable in topology if topology exists
+	// Check if ClusterClass defines clusterVip variable (legacy mode)
+	// Only patch topology.variables if the variable is defined in ClusterClass
 	if cluster.Spec.Topology != nil {
-		// Find existing clusterVip variable
-		found := false
-		for i := range cluster.Spec.Topology.Variables {
-			if cluster.Spec.Topology.Variables[i].Name == "clusterVip" {
-				cluster.Spec.Topology.Variables[i].Value.Raw = []byte(fmt.Sprintf("%q", ip))
-				found = true
-				break
-			}
+		clusterClass, err := r.getClusterClass(ctx, cluster.Spec.Topology.Class)
+		if err != nil {
+			return fmt.Errorf("get ClusterClass: %w", err)
 		}
 
-		// If not found, append new variable
-		if !found {
-			cluster.Spec.Topology.Variables = append(cluster.Spec.Topology.Variables, clusterv1.ClusterVariable{
-				Name:  "clusterVip",
-				Value: apiextensionsv1.JSON{Raw: []byte(fmt.Sprintf("%q", ip))},
-			})
+		// Check if ClusterClass defines clusterVip variable
+		if r.hasClusterVipVariable(clusterClass) {
+			// Legacy mode: update or add clusterVip variable
+			found := false
+			for i := range cluster.Spec.Topology.Variables {
+				if cluster.Spec.Topology.Variables[i].Name == "clusterVip" {
+					cluster.Spec.Topology.Variables[i].Value.Raw = []byte(fmt.Sprintf("%q", ip))
+					found = true
+					break
+				}
+			}
+
+			// If not found, append new variable
+			if !found {
+				cluster.Spec.Topology.Variables = append(cluster.Spec.Topology.Variables, clusterv1.ClusterVariable{
+					Name:  "clusterVip",
+					Value: apiextensionsv1.JSON{Raw: []byte(fmt.Sprintf("%q", ip))},
+				})
+			}
 		}
+		// If ClusterClass doesn't define clusterVip, we're in direct mode
+		// Only controlPlaneEndpoint.Host is patched (lines 205-208)
 	}
 
 	if err := r.Client.Patch(ctx, cluster, patchHelper); err != nil {
@@ -233,4 +244,24 @@ func (r *ClusterReconciler) patchClusterEndpoint(ctx context.Context, cluster *c
 	}
 
 	return nil
+}
+
+// getClusterClass fetches the ClusterClass for the given class name.
+func (r *ClusterReconciler) getClusterClass(ctx context.Context, className string) (*clusterv1.ClusterClass, error) {
+	clusterClass := &clusterv1.ClusterClass{}
+	namespacedName := types.NamespacedName{Name: className}
+	if err := r.Client.Get(ctx, namespacedName, clusterClass); err != nil {
+		return nil, fmt.Errorf("get ClusterClass %q: %w", className, err)
+	}
+	return clusterClass, nil
+}
+
+// hasClusterVipVariable checks if the ClusterClass defines a clusterVip variable.
+func (r *ClusterReconciler) hasClusterVipVariable(clusterClass *clusterv1.ClusterClass) bool {
+	for _, variable := range clusterClass.Spec.Variables {
+		if variable.Name == "clusterVip" {
+			return true
+		}
+	}
+	return false
 }

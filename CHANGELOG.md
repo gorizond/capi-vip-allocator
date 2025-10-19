@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.6] - 2025-10-19
+
+### Fixed
+
+- 🐛 **Critical bug**: Controller now properly detects ClusterClass mode (direct vs legacy)
+  - Controller checks if ClusterClass defines `clusterVip` variable before patching
+  - **Direct mode** (no `clusterVip` variable): Only patches `spec.controlPlaneEndpoint.host`
+  - **Legacy mode** (has `clusterVip` variable): Patches both endpoint AND variable
+  - Previously: Controller ALWAYS tried to add `clusterVip` variable, causing webhook rejection
+- 🔒 **RBAC permissions**: Added missing permissions for `clusterclasses` resource
+  - Controller can now read ClusterClass to detect variables
+  - Fixes: `cannot list resource "clusterclasses" in API group "cluster.x-k8s.io"`
+
+### Changed
+
+- Added `getClusterClass()` function to fetch ClusterClass
+- Added `hasClusterVipVariable()` function to check for variable presence
+- Updated `patchClusterEndpoint()` with conditional logic based on ClusterClass
+- Updated RBAC with `clusterclasses` read permissions (get, list, watch)
+
+### Testing
+
+- Added test `TestClusterReconciler_Reconcile_AssignsIPAddress_DirectMode` - verifies no variable added
+- Added test `TestClusterReconciler_Reconcile_AssignsIPAddress_LegacyMode` - verifies variable added
+- Fixed test helpers to use correct API versions (v1alpha2 for pools, v1beta1 for claims)
+
+### Impact
+
+- ✅ Fixes cluster creation errors: `variable is not defined`
+- ✅ Allows ClusterClass to work WITHOUT `clusterVip` variable
+- ✅ Maintains backward compatibility with legacy ClusterClass
+
+---
+
 ## [v0.1.0] - 2025-10-18
 
 ### Major: Runtime Extension Support
@@ -150,16 +184,18 @@ kubectl edit capiprovider capi-vip-allocator -n capi-system
 
 ## Version Matrix
 
-| Version | Mode | Race Condition | RuntimeSDK | Status |
-|---------|------|----------------|------------|--------|
-| v0.0.3 | Reconciler | ❌ | No | Deprecated |
-| v0.0.4 | Reconciler | ❌ | No | Deprecated |
-| v0.0.5 | Reconciler | ❌ | No | Deprecated |
-| v0.0.6 | Reconciler | ⚠️ | No | Fallback only |
-| **v0.1.0** | **Runtime Extension** | **✅ Fixed** | **Yes** | **Recommended** |
+| Version | Mode | Race Condition | RuntimeSDK | Direct Mode Bug | Status |
+|---------|------|----------------|------------|-----------------|--------|
+| v0.0.3 | Reconciler | ❌ | No | N/A | Deprecated |
+| v0.0.4 | Reconciler | ❌ | No | N/A | Deprecated |
+| v0.0.5 | Reconciler | ❌ | No | N/A | Deprecated |
+| v0.0.6 | Reconciler | ⚠️ | No | N/A | Deprecated |
+| v0.1.0 | Runtime Extension | ✅ Fixed | Yes | ❌ | Deprecated |
+| **v0.1.6** | **Runtime Extension** | **✅ Fixed** | **Yes** | **✅ Fixed** | **Recommended** |
 
 ---
 
+[v0.1.6]: https://github.com/gorizond/capi-vip-allocator/releases/tag/v0.1.6
 [v0.1.0]: https://github.com/gorizond/capi-vip-allocator/releases/tag/v0.1.0
 [v0.0.6]: https://github.com/gorizond/capi-vip-allocator/releases/tag/v0.0.6
 [v0.0.5]: https://github.com/gorizond/capi-vip-allocator/releases/tag/v0.0.5

@@ -95,7 +95,7 @@ func TestClusterReconciler_Reconcile_RequeuesWhenClaimPending(t *testing.T) {
 	}
 }
 
-func TestClusterReconciler_Reconcile_AssignsIPAddress(t *testing.T) {
+func TestClusterReconciler_Reconcile_AssignsIPAddress_DirectMode(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := clusterv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add cluster api scheme: %v", err)
@@ -109,6 +109,18 @@ func TestClusterReconciler_Reconcile_AssignsIPAddress(t *testing.T) {
 		},
 		Spec: clusterv1.ClusterSpec{
 			Topology: &clusterv1.Topology{Class: "example"},
+		},
+	}
+
+	// ClusterClass without clusterVip variable (direct mode)
+	clusterClass := &clusterv1.ClusterClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "example",
+		},
+		Spec: clusterv1.ClusterClassSpec{
+			Variables: []clusterv1.ClusterClassVariable{
+				{Name: "someOtherVariable"},
+			},
 		},
 	}
 
@@ -126,7 +138,7 @@ func TestClusterReconciler_Reconcile_AssignsIPAddress(t *testing.T) {
 
 	ip := newIPAddress("vip-address", cluster.Namespace, "10.0.0.15")
 
-	client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(cluster, pool, claim, ip).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(cluster, clusterClass, pool, claim, ip).Build()
 	reconciler := &ClusterReconciler{
 		Client:      client,
 		Scheme:      scheme,
@@ -154,6 +166,102 @@ func TestClusterReconciler_Reconcile_AssignsIPAddress(t *testing.T) {
 	}
 	if updatedCluster.Spec.ControlPlaneEndpoint.Port != 6443 {
 		t.Fatalf("expected control plane endpoint port to default to 6443, got %d", updatedCluster.Spec.ControlPlaneEndpoint.Port)
+	}
+
+	// In direct mode, clusterVip variable should NOT be added
+	for _, v := range updatedCluster.Spec.Topology.Variables {
+		if v.Name == "clusterVip" {
+			t.Fatalf("clusterVip variable should not be added in direct mode")
+		}
+	}
+}
+
+func TestClusterReconciler_Reconcile_AssignsIPAddress_LegacyMode(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clusterv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add cluster api scheme: %v", err)
+	}
+	registerIPAMGVKs(scheme)
+
+	cluster := &clusterv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster-legacy",
+			Namespace: "default",
+		},
+		Spec: clusterv1.ClusterSpec{
+			Topology: &clusterv1.Topology{Class: "example-legacy"},
+		},
+	}
+
+	// ClusterClass WITH clusterVip variable (legacy mode)
+	clusterClass := &clusterv1.ClusterClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "example-legacy",
+		},
+		Spec: clusterv1.ClusterClassSpec{
+			Variables: []clusterv1.ClusterClassVariable{
+				{Name: "clusterVip"},
+				{Name: "someOtherVariable"},
+			},
+		},
+	}
+
+	pool := newGlobalPool("pool-cp", map[string]string{
+		clusterClassLabel: "example-legacy",
+		roleLabel:         controlPlaneRole,
+	})
+
+	claim := newIPAddressClaim(cluster, "vip-cp-"+cluster.Name)
+	if err := unstructured.SetNestedField(claim.Object, map[string]interface{}{
+		"name": "vip-address",
+	}, "status", "addressRef"); err != nil {
+		t.Fatalf("set claim status: %v", err)
+	}
+
+	ip := newIPAddress("vip-address", cluster.Namespace, "10.0.0.20")
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(cluster, clusterClass, pool, claim, ip).Build()
+	reconciler := &ClusterReconciler{
+		Client:      client,
+		Scheme:      scheme,
+		Logger:      testr.New(t),
+		DefaultPort: 6443,
+	}
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}}
+
+	result, err := reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %v", result.RequeueAfter)
+	}
+
+	updatedCluster := &clusterv1.Cluster{}
+	if err := client.Get(ctx, req.NamespacedName, updatedCluster); err != nil {
+		t.Fatalf("fetch cluster after reconcile: %v", err)
+	}
+	if updatedCluster.Spec.ControlPlaneEndpoint.Host != "10.0.0.20" {
+		t.Fatalf("expected control plane endpoint host to be 10.0.0.20, got %s", updatedCluster.Spec.ControlPlaneEndpoint.Host)
+	}
+	if updatedCluster.Spec.ControlPlaneEndpoint.Port != 6443 {
+		t.Fatalf("expected control plane endpoint port to default to 6443, got %d", updatedCluster.Spec.ControlPlaneEndpoint.Port)
+	}
+
+	// In legacy mode, clusterVip variable SHOULD be added
+	foundVipVariable := false
+	for _, v := range updatedCluster.Spec.Topology.Variables {
+		if v.Name == "clusterVip" {
+			foundVipVariable = true
+			if string(v.Value.Raw) != `"10.0.0.20"` {
+				t.Fatalf("expected clusterVip variable to be %q, got %q", `"10.0.0.20"`, string(v.Value.Raw))
+			}
+		}
+	}
+	if !foundVipVariable {
+		t.Fatalf("clusterVip variable should be added in legacy mode")
 	}
 }
 
@@ -250,7 +358,19 @@ func TestPatchClusterEndpointPreservesExistingPort(t *testing.T) {
 		},
 	}
 
-	client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(cluster).Build()
+	// ClusterClass without clusterVip variable (direct mode)
+	clusterClass := &clusterv1.ClusterClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "example",
+		},
+		Spec: clusterv1.ClusterClassSpec{
+			Variables: []clusterv1.ClusterClassVariable{
+				{Name: "someOtherVariable"},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(cluster, clusterClass).Build()
 	reconciler := &ClusterReconciler{
 		Client:      client,
 		Scheme:      scheme,
@@ -316,9 +436,13 @@ func TestResolveIPAddressPendingWithoutIPAddressResource(t *testing.T) {
 }
 
 func registerIPAMGVKs(scheme *runtime.Scheme) {
+	// Register pool types with v1alpha2
+	gvPool := schema.GroupVersion{Group: ipamGroup, Version: globalPoolAPIVersion}
+	scheme.AddKnownTypeWithName(gvPool.WithKind(globalPoolKind), &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(gvPool.WithKind(globalPoolKind+"List"), &unstructured.UnstructuredList{})
+
+	// Register claim/address types with v1beta1
 	gv := schema.GroupVersion{Group: ipamGroup, Version: ipamVersion}
-	scheme.AddKnownTypeWithName(gv.WithKind(globalPoolKind), &unstructured.Unstructured{})
-	scheme.AddKnownTypeWithName(gv.WithKind(globalPoolKind+"List"), &unstructured.UnstructuredList{})
 	scheme.AddKnownTypeWithName(gv.WithKind(ipAddressClaimKind), &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(gv.WithKind(ipAddressClaimKind+"List"), &unstructured.UnstructuredList{})
 	scheme.AddKnownTypeWithName(gv.WithKind(ipAddressKind), &unstructured.Unstructured{})
@@ -327,7 +451,7 @@ func registerIPAMGVKs(scheme *runtime.Scheme) {
 
 func newGlobalPool(name string, labels map[string]string) *unstructured.Unstructured {
 	pool := &unstructured.Unstructured{}
-	pool.SetGroupVersionKind(schema.GroupVersionKind{Group: ipamGroup, Version: ipamVersion, Kind: globalPoolKind})
+	pool.SetGroupVersionKind(schema.GroupVersionKind{Group: ipamGroup, Version: globalPoolAPIVersion, Kind: globalPoolKind})
 	pool.SetName(name)
 	pool.SetLabels(labels)
 	return pool
