@@ -63,7 +63,7 @@ spec:
   type: addon  # Runtime Extension providers use 'addon' type
   version: v0.1.0
   fetchConfig:
-    url: https://github.com/gorizond/capi-vip-allocator/releases/download/v0.1.0/capi-vip-allocator.yaml
+    url: https://github.com/gorizond/capi-vip-allocator/releases/download/v0.1.7/capi-vip-allocator.yaml
 ```
 
 **Note:** Runtime Extensions are registered via `ExtensionConfig` resource (included in the manifest), not through CAPIProvider type.
@@ -71,7 +71,7 @@ spec:
 Or directly:
 
 ```bash
-kubectl apply -f https://github.com/gorizond/capi-vip-allocator/releases/download/v0.1.0/capi-vip-allocator.yaml
+kubectl apply -f https://github.com/gorizond/capi-vip-allocator/releases/download/v0.1.7/capi-vip-allocator.yaml
 ```
 
 ### Create IP Pool
