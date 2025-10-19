@@ -175,7 +175,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	response.SetStatus(runtimehooksv1.ResponseStatusSuccess)
 	response.Handlers = []runtimehooksv1.ExtensionHandler{
 		{
-			Name: s.extension.Name(),
+			Name: s.extension.Name() + "-generate-patches",
 			RequestHook: runtimehooksv1.GroupVersionHook{
 				APIVersion: runtimehooksv1.GroupVersion.String(),
 				Hook:       "GeneratePatches",
@@ -184,7 +184,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 			FailurePolicy:  &failPolicyFail,
 		},
 		{
-			Name: s.extension.Name(),
+			Name: s.extension.Name() + "-before-create",
 			RequestHook: runtimehooksv1.GroupVersionHook{
 				APIVersion: runtimehooksv1.GroupVersion.String(),
 				Hook:       "BeforeClusterCreate",
@@ -193,7 +193,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 			FailurePolicy:  &failPolicyIgnore,
 		},
 		{
-			Name: s.extension.Name(),
+			Name: s.extension.Name() + "-before-delete",
 			RequestHook: runtimehooksv1.GroupVersionHook{
 				APIVersion: runtimehooksv1.GroupVersion.String(),
 				Hook:       "BeforeClusterDelete",
@@ -202,7 +202,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 			FailurePolicy:  &failPolicyIgnore,
 		},
 		{
-			Name: s.extension.Name(),
+			Name: s.extension.Name() + "-after-upgrade",
 			RequestHook: runtimehooksv1.GroupVersionHook{
 				APIVersion: runtimehooksv1.GroupVersion.String(),
 				Hook:       "AfterClusterUpgrade",
