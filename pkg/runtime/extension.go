@@ -4,15 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/go-logr/logr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	runtimehooksv1 "sigs.k8s.io/cluster-api/exp/runtime/hooks/api/v1alpha1"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -27,6 +30,10 @@ const (
 	roleLabel            = "vip.capi.gorizond.io/role"
 	controlPlaneRole     = "control-plane"
 	defaultPort          = int32(6443)
+
+	// IP allocation retry settings
+	ipAllocationTimeout  = 25 * time.Second // Must be less than hook timeout (30s)
+	ipAllocationInterval = 500 * time.Millisecond
 )
 
 // VIPExtension implements CAPI Runtime Extension for VIP allocation.
@@ -229,6 +236,8 @@ func (e *VIPExtension) findPool(ctx context.Context, className, role string) (st
 }
 
 func (e *VIPExtension) preallocateIP(ctx context.Context, cluster *clusterv1.Cluster, claimName, poolName string) (string, error) {
+	log := e.Logger.WithValues("cluster", cluster.Name, "claim", claimName, "pool", poolName)
+
 	// Check if claim already exists
 	claimGVK := schema.GroupVersionKind{Group: ipamGroup, Version: ipamVersion, Kind: ipAddressClaimKind}
 	claim := &unstructured.Unstructured{}
@@ -240,10 +249,12 @@ func (e *VIPExtension) preallocateIP(ctx context.Context, cluster *clusterv1.Clu
 	err := e.Client.Get(ctx, namespacedName, claim)
 	if err == nil {
 		// Claim exists, check if IP is ready
-		return e.getIPFromClaim(ctx, cluster.Namespace, claim)
+		log.V(1).Info("IPAddressClaim already exists, checking for IP")
+		return e.waitForIPAllocation(ctx, cluster.Namespace, namespacedName, claim)
 	}
 
 	// Create new claim (without ownerReference - Cluster doesn't exist in etcd yet!)
+	log.Info("Creating new IPAddressClaim")
 	claim.SetName(claimName)
 	claim.SetNamespace(cluster.Namespace)
 	claim.SetLabels(map[string]string{
@@ -264,14 +275,54 @@ func (e *VIPExtension) preallocateIP(ctx context.Context, cluster *clusterv1.Clu
 		return "", fmt.Errorf("create IPAddressClaim: %w", err)
 	}
 
-	// Wait for IP to be allocated (with short timeout for webhook context)
-	// In production, you might want to implement a retry mechanism
-	// For now, we'll try once and fail if not ready
-	if err := e.Client.Get(ctx, namespacedName, claim); err != nil {
-		return "", fmt.Errorf("get claim after create: %w", err)
+	log.Info("IPAddressClaim created, waiting for IP allocation")
+	// Wait for IP to be allocated with retry
+	return e.waitForIPAllocation(ctx, cluster.Namespace, namespacedName, nil)
+}
+
+// waitForIPAllocation waits for IP to be allocated to the claim with retry logic.
+func (e *VIPExtension) waitForIPAllocation(ctx context.Context, namespace string, namespacedName types.NamespacedName, existingClaim *unstructured.Unstructured) (string, error) {
+	log := e.Logger.WithValues("claim", namespacedName.Name, "namespace", namespace)
+
+	claimGVK := schema.GroupVersionKind{Group: ipamGroup, Version: ipamVersion, Kind: ipAddressClaimKind}
+
+	var allocatedIP string
+	err := wait.PollUntilContextTimeout(ctx, ipAllocationInterval, ipAllocationTimeout, true, func(ctx context.Context) (bool, error) {
+		claim := existingClaim
+		if claim == nil {
+			claim = &unstructured.Unstructured{}
+			claim.SetGroupVersionKind(claimGVK)
+			if err := e.Client.Get(ctx, namespacedName, claim); err != nil {
+				if errors.IsNotFound(err) {
+					log.V(1).Info("IPAddressClaim not found yet, retrying")
+					return false, nil // Retry
+				}
+				return false, err // Permanent error
+			}
+		}
+
+		// Try to get IP from claim
+		ip, err := e.getIPFromClaim(ctx, namespace, claim)
+		if err != nil {
+			log.V(1).Info("IP not ready yet, retrying", "error", err.Error())
+			// Reset claim for next iteration to force refresh
+			existingClaim = nil
+			return false, nil // Retry
+		}
+
+		allocatedIP = ip
+		log.Info("IP successfully allocated", "ip", allocatedIP)
+		return true, nil // Success
+	})
+
+	if err != nil {
+		if wait.Interrupted(err) {
+			return "", fmt.Errorf("timeout waiting for IP allocation after %v", ipAllocationTimeout)
+		}
+		return "", fmt.Errorf("error waiting for IP allocation: %w", err)
 	}
 
-	return e.getIPFromClaim(ctx, cluster.Namespace, claim)
+	return allocatedIP, nil
 }
 
 func (e *VIPExtension) getIPFromClaim(ctx context.Context, namespace string, claim *unstructured.Unstructured) (string, error) {

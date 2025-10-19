@@ -68,16 +68,23 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	if cluster.Spec.ControlPlaneEndpoint.Host != "" {
-		return ctrl.Result{}, nil
-	}
-
 	claimName := fmt.Sprintf("vip-cp-%s", cluster.Name)
 
+	// Ensure claim exists and adopt it if needed (created by runtime extension)
 	claim, err := r.ensureClaim(ctx, cluster, claimName)
 	if err != nil {
 		log.Error(err, "ensure IPAddressClaim")
 		return ctrl.Result{}, err
+	}
+
+	// Re-fetch cluster to check if runtime extension already set the endpoint
+	if err := r.Client.Get(ctx, req.NamespacedName, cluster); err != nil {
+		return ctrl.Result{}, fmt.Errorf("re-fetch cluster: %w", err)
+	}
+
+	if cluster.Spec.ControlPlaneEndpoint.Host != "" {
+		log.Info("controlPlaneEndpoint already set (likely by runtime extension)", "host", cluster.Spec.ControlPlaneEndpoint.Host)
+		return ctrl.Result{}, nil
 	}
 
 	ip, ready, err := r.resolveIPAddress(ctx, cluster.Namespace, claim)
@@ -100,6 +107,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 }
 
 func (r *ClusterReconciler) ensureClaim(ctx context.Context, cluster *clusterv1.Cluster, claimName string) (*unstructured.Unstructured, error) {
+	log := r.Logger.WithValues("cluster", cluster.Name, "claim", claimName)
 	claimGVK := schema.GroupVersionKind{Group: ipamGroup, Version: ipamVersion, Kind: ipAddressClaimKind}
 
 	claim := &unstructured.Unstructured{}
@@ -107,6 +115,19 @@ func (r *ClusterReconciler) ensureClaim(ctx context.Context, cluster *clusterv1.
 
 	namespacedName := types.NamespacedName{Name: claimName, Namespace: cluster.Namespace}
 	if err := r.Client.Get(ctx, namespacedName, claim); err == nil {
+		// Claim exists - check if it needs ownerReference adoption
+		if len(claim.GetOwnerReferences()) == 0 {
+			// Claim was created by runtime extension hook without ownerRef
+			// Adopt it by adding ownerReference
+			log.Info("Adopting IPAddressClaim created by runtime extension")
+			ownerRef := metav1.NewControllerRef(cluster, clusterv1.GroupVersion.WithKind("Cluster"))
+			claim.SetOwnerReferences([]metav1.OwnerReference{*ownerRef})
+
+			if err := r.Client.Update(ctx, claim); err != nil {
+				return nil, fmt.Errorf("adopt IPAddressClaim: %w", err)
+			}
+			log.Info("IPAddressClaim adopted successfully")
+		}
 		return claim, nil
 	} else if !errors.IsNotFound(err) {
 		return nil, fmt.Errorf("get IPAddressClaim: %w", err)

@@ -19,13 +19,17 @@ CAPI Topology Controller calls GeneratePatches hook
          ↓
 VIP Allocator Extension
   1. Finds IP pool by cluster-class label
-  2. Creates IPAddressClaim
-  3. Waits for IPAM to allocate IP (~5 sec)
+  2. Creates IPAddressClaim (without ownerRef - Cluster not in etcd yet)
+  3. Waits for IPAM to allocate IP (retry every 500ms, max 25s)
   4. Returns patch: {host: "10.2.0.20"}
          ↓
 Cluster saved to etcd WITH IP ✅
          ↓
 InfrastructureCluster created successfully ✅
+         ↓
+Reconciler adopts IPAddressClaim (adds ownerReference)
+         ↓
+Cleanup on delete: ownerReference ensures IPAddressClaim is deleted ✅
 ```
 
 ## Quick Start
@@ -61,9 +65,9 @@ metadata:
   namespace: capi-system
 spec:
   type: addon  # Runtime Extension providers use 'addon' type
-  version: v0.1.0
+  version: v0.1.9
   fetchConfig:
-    url: https://github.com/gorizond/capi-vip-allocator/releases/download/v0.1.7/capi-vip-allocator.yaml
+    url: https://github.com/gorizond/capi-vip-allocator/releases/download/v0.1.9/capi-vip-allocator.yaml
 ```
 
 **Note:** Runtime Extensions are registered via `ExtensionConfig` resource (included in the manifest), not through CAPIProvider type.
@@ -71,7 +75,7 @@ spec:
 Or directly:
 
 ```bash
-kubectl apply -f https://github.com/gorizond/capi-vip-allocator/releases/download/v0.1.7/capi-vip-allocator.yaml
+kubectl apply -f https://github.com/gorizond/capi-vip-allocator/releases/download/v0.1.9/capi-vip-allocator.yaml
 ```
 
 ### Create IP Pool

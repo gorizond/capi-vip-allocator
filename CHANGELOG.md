@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.9] - 2025-10-19
+
+### Fixed
+
+- 🐛 **Critical bug**: Runtime Extension now waits for IP allocation with retry logic
+  - Previously: `GeneratePatches` hook created IPAddressClaim and immediately tried to read IP
+  - Problem: IPAM controller didn't have time to allocate IP → hook returned error → topology rendered without VIP
+  - Now: Added `waitForIPAllocation()` with 25s timeout and 500ms polling interval
+  - **Impact**: Fixes race condition where ProxmoxCluster was created with empty `controlPlaneEndpoint`
+
+- 🔄 **Reconciler improvements**: Added adoption logic for IPAddressClaim created by Runtime Extension
+  - Runtime Extension creates claims WITHOUT ownerReference (Cluster doesn't exist in etcd yet)
+  - Reconciler now detects such claims and adopts them by adding ownerReference
+  - Prevents orphaned IPAddressClaim resources after cluster deletion
+
+- 🏁 **Race condition fix**: Reconciler re-fetches Cluster after ensuring claim exists
+  - Prevents reconciler from overwriting endpoint already set by Runtime Extension
+  - Better logging when endpoint is already set
+
+### Added
+
+- `waitForIPAllocation()` function with exponential backoff retry logic
+- Constants for IP allocation timeout and retry interval
+- Better logging in Runtime Extension for IP allocation progress
+- Adoption logic in `ensureClaim()` for claims without ownerReferences
+
+### Changed
+
+- `preallocateIP()` now calls `waitForIPAllocation()` instead of single-shot IP read
+- Reconciler checks endpoint AFTER claim adoption (not before)
+- Improved log messages with clearer context
+
+### Technical Details
+
+- Timeout: 25 seconds (less than CAPI hook timeout of 30s)
+- Polling interval: 500ms
+- Uses `wait.PollUntilContextTimeout` from `k8s.io/apimachinery/pkg/util/wait`
+- Distinguishes between retryable errors (IP not ready) and permanent errors
+
+---
+
 ## [v0.1.8] - 2025-10-19
 
 ### Fixed
