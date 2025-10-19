@@ -1,0 +1,26 @@
+# Certificate for Runtime Extension service
+# Creates TLS certificate for secure connection between CAPI controller-manager and Runtime Extension
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: capi-vip-allocator-runtime-extension-cert
+  namespace: capi-system
+  labels:
+    cluster.x-k8s.io/provider: vip-allocator
+spec:
+  # DNS names for the certificate (Service DNS)
+  dnsNames:
+    - capi-vip-allocator-runtime-extension.capi-system.svc
+    - capi-vip-allocator-runtime-extension.capi-system.svc.cluster.local
+  
+  # Reference to Issuer for certificate generation
+  issuerRef:
+    kind: Issuer
+    name: capi-vip-allocator-selfsigned-issuer
+  
+  # Secret name where certificate will be stored
+  secretName: capi-vip-allocator-runtime-extension-tls
+  
+  # Certificate validity duration (default 90 days for self-signed)
+  # duration: 2160h # 90 days
+  # renewBefore: 720h # renew 30 days before expiration

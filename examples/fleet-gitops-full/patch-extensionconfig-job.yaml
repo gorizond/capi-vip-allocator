@@ -1,0 +1,86 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: patch-extensionconfig-cabundle
+  namespace: capi-system
+  labels:
+    cluster.x-k8s.io/provider: vip-allocator
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      serviceAccountName: capi-vip-allocator-extensionconfig-patcher
+      restartPolicy: OnFailure
+      containers:
+      - name: patch
+        image: bitnami/kubectl:latest
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          
+          # Ждем пока Secret будет создан
+          echo "Waiting for Secret capi-vip-allocator-runtime-extension-tls..."
+          until kubectl get secret -n capi-system capi-vip-allocator-runtime-extension-tls 2>/dev/null; do
+            echo "Secret not found, waiting..."
+            sleep 5
+          done
+          echo "Secret found!"
+          
+          # Получаем CA bundle из Secret
+          echo "Extracting CA bundle from Secret..."
+          CA_BUNDLE=$(kubectl get secret -n capi-system capi-vip-allocator-runtime-extension-tls -o jsonpath='{.data.ca\.crt}')
+          
+          if [ -z "$CA_BUNDLE" ]; then
+            echo "ERROR: CA_BUNDLE is empty!"
+            exit 1
+          fi
+          
+          echo "CA bundle extracted successfully (length: ${#CA_BUNDLE})"
+          
+          # Патчим ExtensionConfig (без -n, так как это cluster-scoped ресурс)
+          echo "Patching ExtensionConfig with CA bundle..."
+          kubectl patch extensionconfig vip-allocator --type='json' \
+            -p='[{"op": "replace", "path": "/spec/clientConfig/caBundle", "value": "'"$CA_BUNDLE"'"}]'
+          
+          echo "ExtensionConfig patched successfully!"
+          
+          # Проверяем результат
+          echo "Verifying patch..."
+          kubectl get extensionconfig vip-allocator -o jsonpath='{.spec.clientConfig.caBundle}' | head -c 50
+          echo "..."
+          echo "Done!"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: capi-vip-allocator-extensionconfig-patcher
+  namespace: capi-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: capi-vip-allocator-extensionconfig-patcher
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+  resourceNames: ["capi-vip-allocator-runtime-extension-tls"]
+- apiGroups: ["runtime.cluster.x-k8s.io"]
+  resources: ["extensionconfigs"]
+  verbs: ["get", "patch"]
+  resourceNames: ["vip-allocator"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: capi-vip-allocator-extensionconfig-patcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: capi-vip-allocator-extensionconfig-patcher
+subjects:
+- kind: ServiceAccount
+  name: capi-vip-allocator-extensionconfig-patcher
+  namespace: capi-system

@@ -152,6 +152,7 @@ Deployment args:
 
 - `--enable-runtime-extension=true` - Enable Runtime Extension mode (default: true)
 - `--runtime-extension-port=9443` - Runtime Extension server port
+- `--runtime-extension-name=vip-allocator` - Name of the runtime extension handler (must not contain dots, default: vip-allocator)
 - `--leader-elect` - Enable leader election
 - `--default-port=6443` - Default control plane port
 

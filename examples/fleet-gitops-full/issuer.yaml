@@ -1,0 +1,11 @@
+# Self-signed Issuer for certificate generation
+# cert-manager must already be installed in the cluster
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: capi-vip-allocator-selfsigned-issuer
+  namespace: capi-system
+  labels:
+    cluster.x-k8s.io/provider: vip-allocator
+spec:
+  selfSigned: {}

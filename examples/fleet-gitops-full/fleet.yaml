@@ -1,0 +1,36 @@
+# Fleet configuration for ExtensionConfig deployment
+# Settings for Fleet GitOps - how and where to apply manifests
+
+# Target clusters
+# Applied only to the management cluster (where Cluster API is deployed)
+targets:
+  - name: local
+    clusterSelector:
+      matchLabels:
+        # Apply only to Rancher local cluster
+        # (where CAPI controller-manager is deployed)
+        provider.cattle.io: rke2
+    
+    # Can also use clusterName for specific cluster:
+    # clusterName: local
+
+# Diff settings for change control
+diff:
+  comparePatches:
+    - apiVersion: runtime.cluster.x-k8s.io/v1alpha1
+      kind: ExtensionConfig
+      operations:
+        # Ignore automatically added caBundle field
+        # as it's managed by CAPI controller-manager
+        - {"op": "remove", "path": "/spec/clientConfig/caBundle"}
+
+# Settings for correct order of application
+# Fleet will wait for resource readiness before applying next ones
+correctDrift:
+  enabled: true
+  force: false
+  keepFailHistory: 3
+
+# Settings for status monitoring
+# Fleet will check ExtensionConfig status
+paused: false

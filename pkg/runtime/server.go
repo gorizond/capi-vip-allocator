@@ -22,9 +22,9 @@ type Server struct {
 }
 
 // NewServer creates a new Runtime Extension server.
-func NewServer(client client.Client, logger logr.Logger, port int, certDir string) *Server {
+func NewServer(client client.Client, logger logr.Logger, port int, certDir string, extensionName string) *Server {
 	return &Server{
-		extension: NewVIPExtension(client, logger),
+		extension: NewVIPExtension(client, logger, extensionName),
 		logger:    logger,
 		port:      port,
 		certDir:   certDir,

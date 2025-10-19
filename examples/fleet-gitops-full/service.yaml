@@ -1,0 +1,20 @@
+# Service for Runtime Extension
+# Provides access to Runtime Extension endpoint for CAPI controller-manager
+apiVersion: v1
+kind: Service
+metadata:
+  name: capi-vip-allocator-runtime-extension
+  namespace: capi-system
+  labels:
+    cluster.x-k8s.io/provider: vip-allocator
+spec:
+  ports:
+    - name: runtime-extension
+      port: 443
+      protocol: TCP
+      targetPort: runtime-ext  # Port in pod (9443)
+  selector:
+    # Selector for capi-vip-allocator pods
+    cluster.x-k8s.io/provider: vip-allocator
+    control-plane: capi-vip-allocator-controller-manager
+  type: ClusterIP

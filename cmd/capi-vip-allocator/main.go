@@ -35,6 +35,7 @@ func main() {
 		defaultPort          int
 		runtimeExtPort       int
 		enableRuntimeExt     bool
+		runtimeExtName       string
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
@@ -43,6 +44,7 @@ func main() {
 	flag.IntVar(&defaultPort, "default-port", 6443, "Default control plane port to set when absent.")
 	flag.IntVar(&runtimeExtPort, "runtime-extension-port", 9443, "The port for the runtime extension server.")
 	flag.BoolVar(&enableRuntimeExt, "enable-runtime-extension", false, "Enable CAPI Runtime Extension server for BeforeClusterCreate hook.")
+	flag.StringVar(&runtimeExtName, "runtime-extension-name", "vip-allocator", "The name of the runtime extension handler (must not contain dots).")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -88,9 +90,9 @@ func main() {
 
 	// Start Runtime Extension server if enabled
 	if enableRuntimeExt {
-		setupLog.Info("runtime extension enabled", "port", runtimeExtPort)
+		setupLog.Info("runtime extension enabled", "port", runtimeExtPort, "name", runtimeExtName)
 		certDir := "/tmp/runtime-extension/serving-certs"
-		extServer := runtimeext.NewServer(mgr.GetClient(), ctrl.Log.WithName("runtime-extension"), runtimeExtPort, certDir)
+		extServer := runtimeext.NewServer(mgr.GetClient(), ctrl.Log.WithName("runtime-extension"), runtimeExtPort, certDir, runtimeExtName)
 
 		if err := mgr.Add(extServer); err != nil {
 			setupLog.Error(err, "unable to add runtime extension server to manager")

@@ -31,21 +31,26 @@ const (
 
 // VIPExtension implements CAPI Runtime Extension for VIP allocation.
 type VIPExtension struct {
-	Client client.Client
-	Logger logr.Logger
+	Client        client.Client
+	Logger        logr.Logger
+	ExtensionName string
 }
 
 // NewVIPExtension creates a new VIP runtime extension.
-func NewVIPExtension(client client.Client, logger logr.Logger) *VIPExtension {
+func NewVIPExtension(client client.Client, logger logr.Logger, extensionName string) *VIPExtension {
+	if extensionName == "" {
+		extensionName = "vip-allocator" // Default name without dots
+	}
 	return &VIPExtension{
-		Client: client,
-		Logger: logger,
+		Client:        client,
+		Logger:        logger,
+		ExtensionName: extensionName,
 	}
 }
 
 // Name returns the name of the extension.
 func (e *VIPExtension) Name() string {
-	return "vip-allocator.capi.gorizond.io"
+	return e.ExtensionName
 }
 
 // GeneratePatches is called during Cluster topology reconciliation to generate patches.

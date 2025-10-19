@@ -1,0 +1,70 @@
+# Example GitRepo for Fleet
+# Create this resource in your Rancher/Fleet after:
+# 1. Copy files to your Git repository
+# 2. Commit and push changes
+# 3. Clean up existing resources (run cleanup-existing.sh)
+
+apiVersion: fleet.cattle.io/v1alpha1
+kind: GitRepo
+metadata:
+  # GitRepo name - will be displayed in Fleet UI
+  name: capi-vip-allocator-extensionconfig
+  # Namespace where GitRepo is created (usually fleet-default for Rancher)
+  namespace: fleet-default
+spec:
+  # Your Git repository URL
+  # REPLACE with your repository!
+  repo: https://github.com/your-org/your-fleet-repo
+  
+  # Branch to track
+  branch: main
+  
+  # Path to directory with manifests in the repository
+  # If copied to root - remove paths, if in subdirectory - specify path
+  paths:
+    - capi-vip-allocator-extensionconfig
+  
+  # Target clusters - where to apply manifests
+  targets:
+    # Option 1: By cluster name
+    - clusterName: local
+    
+    # Option 2: By selector (commented out)
+    # - clusterSelector:
+    #     matchLabels:
+    #       provider.cattle.io: rke2
+    #       # or other labels of your management cluster
+  
+  # Polling interval - how often to check for changes in Git
+  # Default 15s, can increase for production
+  pollingInterval: 15s
+  
+  # Dependencies - ensure main provider is deployed
+  # Uncomment if you have a separate GitRepo for main CAPIProvider
+  # dependsOn:
+  #   - selector:
+  #       matchLabels:
+  #         fleet.cattle.io/repo-name: capi-vip-allocator-provider
+  
+  # ServiceAccount for applying manifests (optional)
+  # serviceAccount: fleet-default-serviceaccount
+  
+  # Settings for correct drift detection
+  correctDrift:
+    enabled: true
+    force: false
+    keepFailHistory: 5
+  
+  # Number of retries on error
+  # retryPolicy:
+  #   maxRetries: 3
+  #   retryInterval: 30s
+
+---
+# After creating GitRepo, check status:
+# kubectl get gitrepo -n fleet-default capi-vip-allocator-extensionconfig
+# kubectl describe gitrepo -n fleet-default capi-vip-allocator-extensionconfig
+#
+# Check created Bundle:
+# kubectl get bundles -n fleet-local
+# kubectl describe bundle -n fleet-local <bundle-name>
