@@ -31,9 +31,13 @@ const (
 	controlPlaneRole     = "control-plane"
 	defaultPort          = int32(6443)
 
-	// IP allocation retry settings
+	// IP allocation retry settings for GeneratePatches hook
 	ipAllocationTimeout  = 25 * time.Second // Must be less than hook timeout (30s)
 	ipAllocationInterval = 500 * time.Millisecond
+
+	// BeforeClusterCreate hook timeout settings
+	beforeCreateIPTimeout  = 55 * time.Second // Must be less than hook timeout (60s)
+	beforeCreateIPInterval = 1 * time.Second  // Slightly longer interval for this hook
 )
 
 // VIPExtension implements CAPI Runtime Extension for VIP allocation.
@@ -242,14 +246,82 @@ func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehook
 	response.SetStatus(runtimehooksv1.ResponseStatusSuccess)
 }
 
-// BeforeClusterCreate is called before a Cluster is created (for cleanup/validation only).
+// BeforeClusterCreate is called before a Cluster is created.
+// This hook synchronously allocates a VIP and sets it in Cluster.Spec.ControlPlaneEndpoint
+// BEFORE the cluster object is persisted to etcd.
 func (e *VIPExtension) BeforeClusterCreate(ctx context.Context, request *runtimehooksv1.BeforeClusterCreateRequest, response *runtimehooksv1.BeforeClusterCreateResponse) {
 	log := e.Logger.WithValues("cluster", types.NamespacedName{
 		Name:      request.Cluster.Name,
 		Namespace: request.Cluster.Namespace,
 	})
 
-	log.Info("BeforeClusterCreate hook called (no-op)")
+	log.Info("BeforeClusterCreate hook called")
+
+	// Skip if VIP already set (manual configuration)
+	if request.Cluster.Spec.ControlPlaneEndpoint.Host != "" {
+		log.Info("controlPlaneEndpoint already set, skipping VIP allocation", "host", request.Cluster.Spec.ControlPlaneEndpoint.Host)
+		response.SetStatus(runtimehooksv1.ResponseStatusSuccess)
+		return
+	}
+
+	// Skip if no topology
+	if request.Cluster.Spec.Topology == nil || request.Cluster.Spec.Topology.Class == "" {
+		log.Info("no topology defined, skipping VIP allocation")
+		response.SetStatus(runtimehooksv1.ResponseStatusSuccess)
+		return
+	}
+
+	// 1. Find the IP pool for this cluster class
+	poolName, err := e.findPool(ctx, request.Cluster.Spec.Topology.Class, controlPlaneRole)
+	if err != nil {
+		log.Error(err, "failed to find IP pool")
+		response.SetStatus(runtimehooksv1.ResponseStatusFailure)
+		response.SetMessage(fmt.Sprintf("failed to find IP pool for cluster class %q: %v", request.Cluster.Spec.Topology.Class, err))
+		return
+	}
+
+	if poolName == "" {
+		// No pool found - skip VIP allocation (not an error, might be intentional)
+		log.Info("no IP pool found for cluster class, skipping VIP allocation", "clusterClass", request.Cluster.Spec.Topology.Class)
+		response.SetStatus(runtimehooksv1.ResponseStatusSuccess)
+		return
+	}
+
+	log.Info("found IP pool for VIP allocation", "pool", poolName)
+
+	// 2. Ensure IPAddressClaim exists (create if needed)
+	claimName := fmt.Sprintf("vip-cp-%s", request.Cluster.Name)
+	claim, err := e.ensureIPAddressClaimForBeforeCreate(ctx, &request.Cluster, claimName, poolName)
+	if err != nil {
+		log.Error(err, "failed to ensure IPAddressClaim")
+		response.SetStatus(runtimehooksv1.ResponseStatusFailure)
+		response.SetMessage(fmt.Sprintf("failed to create IPAddressClaim: %v", err))
+		return
+	}
+
+	// 3. Wait for VIP allocation from IPAM
+	vip, err := e.waitForVIPInBeforeCreate(ctx, request.Cluster.Namespace, claim)
+	if err != nil {
+		if wait.Interrupted(err) {
+			// Timeout - request retry
+			log.Info("VIP allocation timeout, requesting retry")
+			response.SetStatus(runtimehooksv1.ResponseStatusFailure)
+			response.SetMessage(fmt.Sprintf("VIP allocation timeout after %v - will retry", beforeCreateIPTimeout))
+			response.RetryAfterSeconds = int32(5) // Retry after 5 seconds
+			return
+		}
+		log.Error(err, "failed to allocate VIP")
+		response.SetStatus(runtimehooksv1.ResponseStatusFailure)
+		response.SetMessage(fmt.Sprintf("failed to allocate VIP: %v", err))
+		return
+	}
+
+	// 4. Set VIP in cluster object BEFORE it's created
+	log.Info("VIP allocated successfully, setting controlPlaneEndpoint", "vip", vip)
+	request.Cluster.Spec.ControlPlaneEndpoint.Host = vip
+	request.Cluster.Spec.ControlPlaneEndpoint.Port = defaultPort
+
+	log.Info("VIP set in BeforeClusterCreate hook - cluster will be created with this endpoint", "vip", vip, "port", defaultPort)
 	response.SetStatus(runtimehooksv1.ResponseStatusSuccess)
 }
 
@@ -563,4 +635,108 @@ func extractClusterName(infraClusterName string) string {
 	// For now, we simply return the name as-is, assuming it matches.
 	// More sophisticated matching could be added if needed.
 	return infraClusterName
+}
+
+// ensureIPAddressClaimForBeforeCreate creates or retrieves an existing IPAddressClaim for BeforeClusterCreate hook.
+// NOTE: Cannot set ownerReference because Cluster doesn't exist in etcd yet.
+// The controller will adopt this claim later by setting ownerReference.
+func (e *VIPExtension) ensureIPAddressClaimForBeforeCreate(ctx context.Context, cluster *clusterv1.Cluster, claimName, poolName string) (*unstructured.Unstructured, error) {
+	log := e.Logger.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace, "claim", claimName, "pool", poolName)
+
+	claimGVK := schema.GroupVersionKind{Group: ipamGroup, Version: ipamVersion, Kind: ipAddressClaimKind}
+	claim := &unstructured.Unstructured{}
+	claim.SetGroupVersionKind(claimGVK)
+
+	namespacedName := types.NamespacedName{Name: claimName, Namespace: cluster.Namespace}
+
+	// Try to get existing claim
+	err := e.Client.Get(ctx, namespacedName, claim)
+	if err == nil {
+		// Claim already exists
+		log.Info("IPAddressClaim already exists, will use it")
+		return claim, nil
+	}
+
+	if !errors.IsNotFound(err) {
+		// Unexpected error
+		log.Error(err, "failed to get IPAddressClaim")
+		return nil, fmt.Errorf("get IPAddressClaim: %w", err)
+	}
+
+	// Create new claim
+	log.Info("IPAddressClaim not found, creating new one")
+	claim.SetName(claimName)
+	claim.SetNamespace(cluster.Namespace)
+	claim.SetLabels(map[string]string{
+		roleLabel: controlPlaneRole,
+		// Add cluster name label for later adoption by controller
+		"cluster.x-k8s.io/cluster-name": cluster.Name,
+	})
+
+	// Set poolRef
+	if err := unstructured.SetNestedField(claim.Object, map[string]interface{}{
+		"apiGroup": ipamGroup,
+		"kind":     globalPoolKind,
+		"name":     poolName,
+	}, "spec", "poolRef"); err != nil {
+		return nil, fmt.Errorf("set poolRef: %w", err)
+	}
+
+	if err := e.Client.Create(ctx, claim); err != nil {
+		if errors.IsAlreadyExists(err) {
+			// Race condition: another process created it
+			log.Info("IPAddressClaim was created by another process, fetching it")
+			if err := e.Client.Get(ctx, namespacedName, claim); err != nil {
+				return nil, fmt.Errorf("fetch existing IPAddressClaim: %w", err)
+			}
+			return claim, nil
+		}
+		log.Error(err, "failed to create IPAddressClaim")
+		return nil, fmt.Errorf("create IPAddressClaim: %w", err)
+	}
+
+	log.Info("IPAddressClaim created successfully")
+	return claim, nil
+}
+
+// waitForVIPInBeforeCreate waits for VIP allocation with longer timeout for BeforeClusterCreate hook.
+func (e *VIPExtension) waitForVIPInBeforeCreate(ctx context.Context, namespace string, claim *unstructured.Unstructured) (string, error) {
+	log := e.Logger.WithValues("claim", claim.GetName(), "namespace", namespace)
+
+	claimGVK := schema.GroupVersionKind{Group: ipamGroup, Version: ipamVersion, Kind: ipAddressClaimKind}
+	namespacedName := types.NamespacedName{Name: claim.GetName(), Namespace: namespace}
+
+	var allocatedIP string
+	err := wait.PollUntilContextTimeout(ctx, beforeCreateIPInterval, beforeCreateIPTimeout, true, func(ctx context.Context) (bool, error) {
+		// Refresh claim
+		freshClaim := &unstructured.Unstructured{}
+		freshClaim.SetGroupVersionKind(claimGVK)
+		if err := e.Client.Get(ctx, namespacedName, freshClaim); err != nil {
+			if errors.IsNotFound(err) {
+				log.V(1).Info("IPAddressClaim not found yet, retrying")
+				return false, nil // Retry
+			}
+			return false, err // Permanent error
+		}
+
+		// Try to get IP from claim
+		ip, err := e.getIPFromClaim(ctx, namespace, freshClaim)
+		if err != nil {
+			log.V(1).Info("IP not ready yet, retrying", "error", err.Error())
+			return false, nil // Retry
+		}
+
+		allocatedIP = ip
+		log.Info("IP successfully allocated", "ip", allocatedIP)
+		return true, nil // Success
+	})
+
+	if err != nil {
+		if wait.Interrupted(err) {
+			return "", fmt.Errorf("timeout waiting for IP allocation after %v: %w", beforeCreateIPTimeout, err)
+		}
+		return "", fmt.Errorf("error waiting for IP allocation: %w", err)
+	}
+
+	return allocatedIP, nil
 }

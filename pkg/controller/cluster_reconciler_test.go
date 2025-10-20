@@ -16,6 +16,63 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+func TestClusterReconciler_Reconcile_SkipsWhenVIPAlreadySet(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clusterv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add cluster api scheme: %v", err)
+	}
+	registerIPAMGVKs(scheme)
+
+	// Cluster with VIP already set (by BeforeClusterCreate hook)
+	cluster := &clusterv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: "default",
+		},
+		Spec: clusterv1.ClusterSpec{
+			Topology: &clusterv1.Topology{Class: "example"},
+			ControlPlaneEndpoint: clusterv1.APIEndpoint{
+				Host: "10.2.0.20",
+				Port: 6443,
+			},
+		},
+	}
+
+	pool := newGlobalPool("pool-cp", map[string]string{
+		clusterClassLabel: "example",
+		roleLabel:         controlPlaneRole,
+	})
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(cluster, pool).Build()
+	reconciler := &ClusterReconciler{
+		Client:      client,
+		Scheme:      scheme,
+		Logger:      testr.New(t),
+		DefaultPort: 6443,
+	}
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}}
+
+	// Reconcile should skip and return immediately
+	result, err := reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %v", result.RequeueAfter)
+	}
+
+	// Verify cluster endpoint unchanged
+	updatedCluster := &clusterv1.Cluster{}
+	if err := client.Get(ctx, req.NamespacedName, updatedCluster); err != nil {
+		t.Fatalf("fetch cluster after reconcile: %v", err)
+	}
+	if updatedCluster.Spec.ControlPlaneEndpoint.Host != "10.2.0.20" {
+		t.Fatalf("expected control plane endpoint host to remain 10.2.0.20, got %s", updatedCluster.Spec.ControlPlaneEndpoint.Host)
+	}
+}
+
 func TestClusterReconciler_Reconcile_RequeuesWhenClaimPending(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := clusterv1.AddToScheme(scheme); err != nil {

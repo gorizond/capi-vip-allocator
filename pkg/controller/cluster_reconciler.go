@@ -52,6 +52,8 @@ func (r *ClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // Reconcile ensures the Cluster has a VIP allocated for its control-plane endpoint.
+// This controller works as a FALLBACK for clusters created without BeforeClusterCreate hook
+// or when the hook fails/is disabled.
 func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Logger.WithValues("cluster", req.NamespacedName)
 
@@ -63,30 +65,39 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, fmt.Errorf("fetch cluster: %w", err)
 	}
 
+	// Skip if no topology (non-ClusterClass clusters)
 	if cluster.Spec.Topology == nil || cluster.Spec.Topology.Class == "" {
-		// Nothing to do for template-less clusters yet.
 		return ctrl.Result{}, nil
 	}
 
+	// EARLY CHECK: Skip if VIP already set by BeforeClusterCreate hook
+	if cluster.Spec.ControlPlaneEndpoint.Host != "" {
+		log.V(1).Info("controlPlaneEndpoint already set (by BeforeClusterCreate hook or manual configuration), skipping reconcile", 
+			"host", cluster.Spec.ControlPlaneEndpoint.Host)
+		
+		// Still ensure claim is adopted (ownerReference set)
+		claimName := fmt.Sprintf("vip-cp-%s", cluster.Name)
+		_, err := r.ensureClaim(ctx, cluster, claimName)
+		if err != nil {
+			// Only log error, don't block reconcile
+			log.V(1).Info("could not adopt IPAddressClaim (may not exist)", "error", err.Error())
+		}
+		
+		return ctrl.Result{}, nil
+	}
+
+	log.Info("controlPlaneEndpoint not set, controller will allocate VIP (fallback mode)")
+
 	claimName := fmt.Sprintf("vip-cp-%s", cluster.Name)
 
-	// Ensure claim exists and adopt it if needed (created by runtime extension)
+	// Ensure claim exists and adopt it if needed (may have been created by runtime extension)
 	claim, err := r.ensureClaim(ctx, cluster, claimName)
 	if err != nil {
 		log.Error(err, "ensure IPAddressClaim")
 		return ctrl.Result{}, err
 	}
 
-	// Re-fetch cluster to check if runtime extension already set the endpoint
-	if err := r.Client.Get(ctx, req.NamespacedName, cluster); err != nil {
-		return ctrl.Result{}, fmt.Errorf("re-fetch cluster: %w", err)
-	}
-
-	if cluster.Spec.ControlPlaneEndpoint.Host != "" {
-		log.Info("controlPlaneEndpoint already set (likely by runtime extension)", "host", cluster.Spec.ControlPlaneEndpoint.Host)
-		return ctrl.Result{}, nil
-	}
-
+	// Wait for IP allocation
 	ip, ready, err := r.resolveIPAddress(ctx, cluster.Namespace, claim)
 	if err != nil {
 		log.Error(err, "resolve IPAddress")
@@ -97,12 +108,13 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{RequeueAfter: defaultRequeueDelay}, nil
 	}
 
+	// Patch cluster endpoint
 	if err := r.patchClusterEndpoint(ctx, cluster, ip, cluster.Namespace); err != nil {
 		log.Error(err, "patch cluster endpoint")
 		return ctrl.Result{}, err
 	}
 
-	log.Info("control-plane VIP assigned", "ip", ip)
+	log.Info("control-plane VIP assigned by controller (fallback mode)", "ip", ip)
 	return ctrl.Result{}, nil
 }
 

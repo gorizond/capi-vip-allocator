@@ -215,8 +215,8 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 				APIVersion: runtimehooksv1.GroupVersion.String(),
 				Hook:       "BeforeClusterCreate",
 			},
-			TimeoutSeconds: ptrInt32(10),
-			FailurePolicy:  &failPolicyIgnore,
+			TimeoutSeconds: ptrInt32(60), // Increased to 60s for VIP allocation
+			FailurePolicy:  &failPolicyFail, // Changed to Fail to block cluster creation if VIP allocation fails
 		},
 		{
 			Name: s.extension.Name() + "-before-delete",
