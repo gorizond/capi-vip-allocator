@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Comma-separated values support in GlobalInClusterIPPool labels**
+  - `vip.capi.gorizond.io/cluster-class` now supports multiple cluster classes: `"class1,class2,class3"`
+  - `vip.capi.gorizond.io/role` now supports multiple roles: `"control-plane,ingress"`
+  - Allows sharing single IP pool across multiple cluster classes
+  - Allows sharing single IP pool for both control-plane and ingress VIPs
+  - Example: `cluster-class: "rke2-proxmox,rke2-vsphere,k3s-proxmox"`
+  - Example: `role: "control-plane,ingress"`
+
+### Changed
+
+- Pool matching logic now checks comma-separated values (backward compatible)
+- Updated documentation with examples of shared pools
+- Added unit tests for comma-separated label matching
+
+---
+
 ## [v0.6.1] - 2025-10-20
 
 ### Changed

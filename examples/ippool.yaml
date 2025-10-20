@@ -3,14 +3,19 @@
 # This pool will be used by capi-vip-allocator to allocate VIPs for clusters
 # with clusterClass = "my-cluster-class"
 #
+# Label matching supports:
+# - Exact match: cluster-class: my-cluster-class
+# - Comma-separated: cluster-class: "class1,class2,class3"
+# - Both labels: role: "control-plane,ingress" (shared pool)
+#
 apiVersion: ipam.cluster.x-k8s.io/v1alpha2
 kind: GlobalInClusterIPPool
 metadata:
   name: control-plane-vip-pool
   labels:
-    # REQUIRED: Match your cluster class name
+    # REQUIRED: Match your cluster class name (exact or comma-separated)
     vip.capi.gorizond.io/cluster-class: my-cluster-class
-    # REQUIRED: Specify role
+    # REQUIRED: Specify role (exact or comma-separated)
     vip.capi.gorizond.io/role: control-plane
 spec:
   addresses:
@@ -18,7 +23,7 @@ spec:
   gateway: "10.0.0.1"
   prefix: 24
 ---
-# Optional: Separate pool for ingress VIPs (future feature)
+# Example: Separate pool for ingress VIPs
 apiVersion: ipam.cluster.x-k8s.io/v1alpha2
 kind: GlobalInClusterIPPool
 metadata:
@@ -29,5 +34,21 @@ metadata:
 spec:
   addresses:
     - "10.0.1.10-10.0.1.20"
+  gateway: "10.0.0.1"
+  prefix: 24
+---
+# Example: Shared pool for multiple cluster classes and roles
+apiVersion: ipam.cluster.x-k8s.io/v1alpha2
+kind: GlobalInClusterIPPool
+metadata:
+  name: shared-vip-pool
+  labels:
+    # Supports multiple cluster classes (comma-separated)
+    vip.capi.gorizond.io/cluster-class: "rke2-proxmox,rke2-vsphere,k3s-proxmox"
+    # Supports multiple roles (comma-separated)
+    vip.capi.gorizond.io/role: "control-plane,ingress"
+spec:
+  addresses:
+    - "10.0.0.50-10.0.0.100"
   gateway: "10.0.0.1"
   prefix: 24

@@ -129,6 +129,30 @@ spec:
   prefix: 24
 ```
 
+**Label matching:**
+- Supports **exact match**: `cluster-class: my-cluster-class`
+- Supports **comma-separated values**: `cluster-class: "class1,class2,class3"`
+- Supports **both labels**: `role: "control-plane,ingress"` (shared pool)
+
+Example with multiple cluster classes:
+
+```yaml
+apiVersion: ipam.cluster.x-k8s.io/v1alpha2
+kind: GlobalInClusterIPPool
+metadata:
+  name: shared-vip-pool
+  labels:
+    # This pool works for multiple cluster classes
+    vip.capi.gorizond.io/cluster-class: "rke2-proxmox,rke2-vsphere,k3s-proxmox"
+    # And for multiple roles
+    vip.capi.gorizond.io/role: "control-plane,ingress"
+spec:
+  addresses:
+    - "10.0.0.10-10.0.0.50"
+  gateway: "10.0.0.1"
+  prefix: 24
+```
+
 ### Create Cluster
 
 ```yaml

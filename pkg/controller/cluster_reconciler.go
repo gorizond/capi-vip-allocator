@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -198,20 +199,65 @@ func (r *ClusterReconciler) findPool(ctx context.Context, className, role string
 	pools := &unstructured.UnstructuredList{}
 	pools.SetGroupVersionKind(poolListGVK)
 
-	selector := client.MatchingLabels(map[string]string{
-		clusterClassLabel: className,
-		roleLabel:         role,
-	})
-
-	if err := r.Client.List(ctx, pools, selector); err != nil {
+	// List all GlobalInClusterIPPool resources without label filtering
+	// We'll filter them manually to support comma-separated values
+	if err := r.Client.List(ctx, pools); err != nil {
 		return "", fmt.Errorf("list %s: %w", globalPoolKind, err)
 	}
 
-	if len(pools.Items) == 0 {
-		return "", nil
+	// Find a pool that matches both className and role (supporting comma-separated values)
+	for _, pool := range pools.Items {
+		labels := pool.GetLabels()
+		
+		// Check if cluster-class label matches (exact or comma-separated)
+		classLabel, classExists := labels[clusterClassLabel]
+		if !classExists {
+			continue
+		}
+		if !labelContainsValue(classLabel, className) {
+			continue
+		}
+
+		// Check if role label matches (exact or comma-separated)
+		roleLabel, roleExists := labels[roleLabel]
+		if !roleExists {
+			continue
+		}
+		if !labelContainsValue(roleLabel, role) {
+			continue
+		}
+
+		// Found a matching pool
+		return pool.GetName(), nil
 	}
 
-	return pools.Items[0].GetName(), nil
+	return "", nil
+}
+
+// labelContainsValue checks if a label value contains the target value.
+// Supports both exact match and comma-separated lists.
+// Examples:
+//   - labelContainsValue("rke2-proxmox-class", "rke2-proxmox-class") -> true
+//   - labelContainsValue("class1,class2,class3", "class2") -> true
+//   - labelContainsValue("class1, class2, class3", "class2") -> true (with spaces)
+func labelContainsValue(labelValue, targetValue string) bool {
+	// Trim spaces from target value
+	targetValue = strings.TrimSpace(targetValue)
+	
+	// Check exact match first (optimization)
+	if strings.TrimSpace(labelValue) == targetValue {
+		return true
+	}
+	
+	// Split by comma and check each value
+	values := strings.Split(labelValue, ",")
+	for _, val := range values {
+		if strings.TrimSpace(val) == targetValue {
+			return true
+		}
+	}
+	
+	return false
 }
 
 func (r *ClusterReconciler) resolveIPAddress(ctx context.Context, namespace string, claim *unstructured.Unstructured) (string, bool, error) {

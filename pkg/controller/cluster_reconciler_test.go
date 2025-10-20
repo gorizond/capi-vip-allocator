@@ -721,3 +721,205 @@ func TestEnsureIngressVIP_SetsAnnotationAndLabel(t *testing.T) {
 		t.Fatalf("expected ingress VIP label to be 10.0.0.101, got %s", gotLabel)
 	}
 }
+
+func TestLabelContainsValue(t *testing.T) {
+	tests := []struct {
+		name        string
+		labelValue  string
+		targetValue string
+		expected    bool
+	}{
+		{
+			name:        "exact match",
+			labelValue:  "rke2-proxmox-class",
+			targetValue: "rke2-proxmox-class",
+			expected:    true,
+		},
+		{
+			name:        "exact match with spaces",
+			labelValue:  " rke2-proxmox-class ",
+			targetValue: "rke2-proxmox-class",
+			expected:    true,
+		},
+		{
+			name:        "comma-separated first value",
+			labelValue:  "class1,class2,class3",
+			targetValue: "class1",
+			expected:    true,
+		},
+		{
+			name:        "comma-separated middle value",
+			labelValue:  "class1,class2,class3",
+			targetValue: "class2",
+			expected:    true,
+		},
+		{
+			name:        "comma-separated last value",
+			labelValue:  "class1,class2,class3",
+			targetValue: "class3",
+			expected:    true,
+		},
+		{
+			name:        "comma-separated with spaces",
+			labelValue:  "class1, class2, class3",
+			targetValue: "class2",
+			expected:    true,
+		},
+		{
+			name:        "comma-separated with mixed spaces",
+			labelValue:  "class1,class2 ,  class3",
+			targetValue: "class3",
+			expected:    true,
+		},
+		{
+			name:        "no match single value",
+			labelValue:  "rke2-proxmox-class",
+			targetValue: "other-class",
+			expected:    false,
+		},
+		{
+			name:        "no match comma-separated",
+			labelValue:  "class1,class2,class3",
+			targetValue: "class4",
+			expected:    false,
+		},
+		{
+			name:        "partial substring no match",
+			labelValue:  "rke2-proxmox-class",
+			targetValue: "rke2",
+			expected:    false,
+		},
+		{
+			name:        "empty label value",
+			labelValue:  "",
+			targetValue: "class1",
+			expected:    false,
+		},
+		{
+			name:        "empty target value",
+			labelValue:  "class1",
+			targetValue: "",
+			expected:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := labelContainsValue(tt.labelValue, tt.targetValue)
+			if got != tt.expected {
+				t.Errorf("labelContainsValue(%q, %q) = %v, expected %v", tt.labelValue, tt.targetValue, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFindPoolWithCommaSeparatedLabels(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clusterv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add cluster api scheme: %v", err)
+	}
+	registerIPAMGVKs(scheme)
+
+	// Pool with comma-separated cluster-class
+	poolMultiClass := newGlobalPool("multi-class-pool", map[string]string{
+		clusterClassLabel: "class1,class2,class3",
+		roleLabel:         controlPlaneRole,
+	})
+
+	// Pool with comma-separated role
+	poolMultiRole := newGlobalPool("multi-role-pool", map[string]string{
+		clusterClassLabel: "prod",
+		roleLabel:         "control-plane,ingress",
+	})
+
+	// Pool with both comma-separated
+	poolBothMulti := newGlobalPool("both-multi-pool", map[string]string{
+		clusterClassLabel: "dev,staging,prod",
+		roleLabel:         "control-plane,ingress",
+	})
+
+	// Single value pools for comparison
+	poolSingle := newGlobalPool("single-pool", map[string]string{
+		clusterClassLabel: "prod",
+		roleLabel:         controlPlaneRole,
+	})
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(poolMultiClass, poolMultiRole, poolBothMulti, poolSingle).
+		Build()
+
+	reconciler := &ClusterReconciler{
+		Client: client,
+		Scheme: scheme,
+		Logger: testr.New(t),
+	}
+
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		className     string
+		role          string
+		expectedPools []string // can match multiple pools, we check if result is one of these
+	}{
+		{
+			name:          "match second value in cluster-class",
+			className:     "class2",
+			role:          controlPlaneRole,
+			expectedPools: []string{"multi-class-pool"},
+		},
+		{
+			name:          "match ingress role in multi-role pool",
+			className:     "prod",
+			role:          ingressRole,
+			expectedPools: []string{"multi-role-pool", "both-multi-pool"},
+		},
+		{
+			name:          "match control-plane role in multi-role pool",
+			className:     "prod",
+			role:          controlPlaneRole,
+			expectedPools: []string{"single-pool", "both-multi-pool"},
+		},
+		{
+			name:          "match staging in both-multi pool",
+			className:     "staging",
+			role:          ingressRole,
+			expectedPools: []string{"both-multi-pool"},
+		},
+		{
+			name:          "no match",
+			className:     "nonexistent",
+			role:          controlPlaneRole,
+			expectedPools: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := reconciler.findPool(ctx, tt.className, tt.role)
+			if err != nil {
+				t.Fatalf("findPool returned error: %v", err)
+			}
+
+			if len(tt.expectedPools) == 0 {
+				if got != "" {
+					t.Fatalf("expected no pool, got %q", got)
+				}
+				return
+			}
+
+			// Check if result is one of expected pools
+			found := false
+			for _, expected := range tt.expectedPools {
+				if got == expected {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected one of %v, got %q", tt.expectedPools, got)
+			}
+		})
+	}
+}
