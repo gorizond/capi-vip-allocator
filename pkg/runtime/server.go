@@ -38,11 +38,10 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Register handlers for each hook with full paths including handler names
 	// CAPI Runtime SDK appends handler name to the hook path
-	// v0.3.0: BeforeClusterCreate sets VIP BEFORE Cluster is created
-	//         GeneratePatches patches InfrastructureCluster AFTER Cluster exists
+	// v0.4.0: GeneratePatches is the ONLY hook (allocates VIP + patches Cluster + patches InfraCluster)
+	//         BeforeClusterCreate removed (cannot modify Cluster - CAPI ignores request.Cluster changes)
 	handlerName := s.extension.Name()
 	mux.HandleFunc(fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/generatepatches/%s-generate-patches", handlerName), s.handleGeneratePatches)
-	mux.HandleFunc(fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclustercreate/%s-before-create", handlerName), s.handleBeforeClusterCreate)
 	mux.HandleFunc(fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclusterdelete/%s-before-delete", handlerName), s.handleBeforeClusterDelete)
 	mux.HandleFunc(fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/afterclusterupgrade/%s-after-upgrade", handlerName), s.handleAfterClusterUpgrade)
 	mux.HandleFunc("/hooks.runtime.cluster.x-k8s.io/v1alpha1/discovery", s.handleDiscovery)
@@ -50,9 +49,8 @@ func (s *Server) Start(ctx context.Context) error {
 	// Add root handler for health checks
 	mux.HandleFunc("/", s.handleRoot)
 
-	s.logger.Info("registered runtime extension handlers (v0.3.0)",
+	s.logger.Info("registered runtime extension handlers (v0.4.0 - GeneratePatches only)",
 		"generatePatches", fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/generatepatches/%s-generate-patches", handlerName),
-		"beforeCreate", fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclustercreate/%s-before-create", handlerName),
 		"beforeDelete", fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclusterdelete/%s-before-delete", handlerName),
 		"afterUpgrade", fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/afterclusterupgrade/%s-after-upgrade", handlerName))
 
@@ -201,7 +199,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 
 	response := &runtimehooksv1.DiscoveryResponse{}
 	response.SetStatus(runtimehooksv1.ResponseStatusSuccess)
-	// v0.3.0: BeforeClusterCreate allocates VIP, GeneratePatches patches InfrastructureCluster
+	// v0.4.0: GeneratePatches is the ONLY hook for VIP allocation (BeforeClusterCreate removed)
 	response.Handlers = []runtimehooksv1.ExtensionHandler{
 		{
 			Name: s.extension.Name() + "-generate-patches",
@@ -209,17 +207,8 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 				APIVersion: runtimehooksv1.GroupVersion.String(),
 				Hook:       "GeneratePatches",
 			},
-			TimeoutSeconds: ptrInt32(10), // Fast - just patching, no allocation
+			TimeoutSeconds: ptrInt32(30), // Increased to 30s for VIP allocation + patching
 			FailurePolicy:  &failPolicyFail,
-		},
-		{
-			Name: s.extension.Name() + "-before-create",
-			RequestHook: runtimehooksv1.GroupVersionHook{
-				APIVersion: runtimehooksv1.GroupVersion.String(),
-				Hook:       "BeforeClusterCreate",
-			},
-			TimeoutSeconds: ptrInt32(30), // CAPI max allowed timeout is 30s
-			FailurePolicy:  &failPolicyFail, // Changed to Fail to block cluster creation if VIP allocation fails
 		},
 		{
 			Name: s.extension.Name() + "-before-delete",

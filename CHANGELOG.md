@@ -2,6 +2,90 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.4.0] - 2025-10-20
+
+### 🚀 Major: Correct Architecture - GeneratePatches is the ONLY hook
+
+**Critical Discovery (session 033)**: BeforeClusterCreate hook **CANNOT** modify Cluster object!
+
+**Root Cause**:
+```
+v0.2.0-v0.3.2 Architecture (BROKEN):
+- BeforeClusterCreate sets request.Cluster.Spec.ControlPlaneEndpoint.Host = "10.2.0.20"
+- CAPI ignores these changes
+- Cluster saved to etcd WITHOUT VIP (host="")
+- Topology reconcile fails with validation error
+❌ Result: ProxmoxCluster validation error - "provided endpoint address is not a valid IP or FQDN"
+```
+
+**Testing Evidence (session 033, cluster rke2-proxmox-test-g13)**:
+- ✅ BeforeClusterCreate hook executed successfully
+- ✅ Logs: "VIP set in BeforeClusterCreate hook - cluster will be created with this endpoint vip=10.2.0.20"
+- ❌ Cluster in etcd: `spec.controlPlaneEndpoint.host = ""` (EMPTY!)
+- ❌ ProxmoxCluster validation failed
+
+**Conclusion**: BeforeClusterCreate hook is **read-only** for Cluster object. Modifications to `request.Cluster` are silently ignored by CAPI.
+
+### Changed
+
+#### Architecture (back to v0.1.9 approach + reconciler disabled)
+
+- **GeneratePatches Hook** - THE ONLY source of VIP allocation and patching
+  - Allocates VIP from GlobalInClusterIPPool
+  - Creates IPAddressClaim (without ownerReference - Cluster not in etcd yet)
+  - Waits for IPAM allocation (max 25s with retry)
+  - Returns patch response with VIP for both Cluster AND InfrastructureCluster
+  - Timeout: 30s (CAPI maximum)
+  
+- **Reconciler Controller** - DISABLED by default (opt-in via `--enable-reconciler`)
+  - Prevents async race condition with GeneratePatches
+  - Only for backward compatibility
+  
+- **BeforeClusterCreate Hook** - REMOVED
+  - Cannot modify Cluster object (CAPI design limitation)
+  - Was source of confusion in v0.2.0-v0.3.x
+
+#### Removed
+
+- BeforeClusterCreate hook and all related code
+- BeforeClusterCreate handler from HTTP server
+- ensureIPAddressClaimForBeforeCreate() function
+- waitForVIPInBeforeCreate() function
+- beforeCreateIPTimeout and beforeCreateIPInterval constants
+
+#### Fixed
+
+- metadata.yaml: minor version 3 → 4
+
+### Migration from v0.3.x
+
+**Automatic** - no action required:
+- GeneratePatches hook already existed in v0.3.x
+- Only BeforeClusterCreate removed (was not working anyway)
+- Reconciler already disabled by default
+- No changes to ClusterClass integration
+
+### Performance
+
+- **GeneratePatches**: 5-15 seconds (IPAM allocation + patching)
+- **Total overhead**: Same as v0.1.9 (working version)
+- **No race condition**: Reconciler disabled
+
+### Why v0.4.0 is correct
+
+|
+
+ Feature | v0.1.9 | v0.2.0-v0.3.x | v0.4.0 |
+|---------|--------|----------------|---------|
+| VIP allocation | GeneratePatches | BeforeClusterCreate | GeneratePatches ✅ |
+| Can modify Cluster? | ✅ Yes (patch) | ❌ No (ignored) | ✅ Yes (patch) |
+| Reconciler | ✅ Enabled | ❌ Enabled (race) | ✅ Disabled |
+| Working? | ✅ Yes | ❌ No | ✅ Yes |
+
+**Lesson learned**: CAPI Runtime SDK hooks that modify objects MUST use patch responses, not direct object modification.
+
+---
+
 ## [v0.3.2] - 2025-10-20
 
 ### Fixed
