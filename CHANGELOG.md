@@ -2,6 +2,57 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.5.0] - 2025-10-20
+
+### 🚀 Major: Back to Reconcile Controller Architecture
+
+**Critical Discovery**: External patches in ClusterClass **CANNOT** patch Cluster object!
+
+**External Patches Limitation** (from CAPI docs):
+```
+"Like inline patches, external patches are only allowed to change fields in spec.template.spec"
+```
+
+External patches work with **Templates** (ProxmoxClusterTemplate), NOT actual objects (Cluster)!
+
+**Testing Evidence (session 033, cluster rke2-proxmox-test-g15)**:
+- ✅ External patch registered in ClusterClass correctly
+- ✅ GeneratePatches hook CALLED by topology controller
+- ❌ GeneratePatches receives TEMPLATES, not Cluster objects
+- ❌ Cannot patch Cluster.spec.controlPlaneEndpoint (only Template.spec.template.spec)
+
+**Architecture Decision**: Return to v0.2.x reconcile controller approach
+
+### Changed
+
+- **Reconcile Controller** - RE-ENABLED (default: true)
+  - Watches Cluster objects with ClusterTopology
+  - Allocates VIP from GlobalInClusterIPPool via IPAM
+  - Sets Cluster.spec.controlPlaneEndpoint.host
+  - ClusterClass inline patches use `{{ .builtin.cluster.spec.controlPlaneEndpoint.host }}`
+  - Topology controller waits until VIP is set before applying patches
+  
+- **Runtime Extension** - DISABLED (default: false)
+  - External patches cannot solve the VIP allocation problem
+  - Kept for backward compatibility and future hooks (AfterUpgrade, BeforeDelete)
+
+### Migration from v0.4.x
+
+1. Remove external patch from ClusterClass:
+   ```yaml
+   spec:
+     patches:
+       - name: vip-allocator  # DELETE THIS
+         external:
+           generateExtension: vip-allocator
+   ```
+
+2. Update CAPIProvider to v0.5.0
+
+3. Reconcile controller will handle VIP allocation automatically
+
+---
+
 ## [v0.4.1] - 2025-10-20
 
 ### Fixed
