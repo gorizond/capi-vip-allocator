@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.3.1] - 2025-10-20
+
+### Fixed
+
+- Updated metadata.yaml properly (minor: 3 for v0.3.x series)
+- No code changes, only release metadata correction
+
+---
+
 ## [v0.3.0] - 2025-10-20
 
 ### 🚀 Major: Eliminated Race Condition - BeforeClusterCreate + GeneratePatches Architecture
