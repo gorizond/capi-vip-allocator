@@ -161,14 +161,21 @@ spec:
 ## Verification
 
 ```bash
-# Check IP allocation (should appear in ~5-10 seconds)
+# Check control plane VIP allocation (should appear in ~5-10 seconds)
 kubectl get cluster my-cluster -o jsonpath='{.spec.controlPlaneEndpoint.host}'
+# Output: 10.0.0.15
 
-# Check ExtensionConfig status
-kubectl get extensionconfig vip-allocator -n capi-system
+# Check ingress VIP annotation (if enabled)
+kubectl get cluster my-cluster -o jsonpath='{.metadata.annotations.vip\.capi\.gorizond\.io/ingress-vip}'
+# Output: 10.0.0.101
+
+# Check IPAddressClaims
+kubectl get ipaddressclaim -n YOUR_NAMESPACE
+# vip-cp-my-cluster        (control plane VIP)
+# vip-ingress-my-cluster   (ingress VIP)
 
 # Check operator logs
-kubectl logs -n capi-system -l control-plane=capi-vip-allocator-controller-manager
+kubectl logs -n capi-system -l control-plane=capi-vip-allocator-controller-manager -f
 ```
 
 ## Configuration
