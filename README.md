@@ -169,6 +169,10 @@ kubectl get cluster my-cluster -o jsonpath='{.spec.controlPlaneEndpoint.host}'
 kubectl get cluster my-cluster -o jsonpath='{.metadata.annotations.vip\.capi\.gorizond\.io/ingress-vip}'
 # Output: 10.0.0.101
 
+# Check ingress VIP label (also set automatically)
+kubectl get cluster my-cluster -o jsonpath='{.metadata.labels.vip\.capi\.gorizond\.io/ingress-vip}'
+# Output: 10.0.0.101
+
 # Check IPAddressClaims
 kubectl get ipaddressclaim -n YOUR_NAMESPACE
 # vip-cp-my-cluster        (control plane VIP)
@@ -679,8 +683,12 @@ helm:
   values:
     nameOverride: kube-vip-ingress
     config:
-      # Read ingressVip from Cluster via ClusterValues
-      address: ${ .ClusterValues.Cluster.spec.topology.variables.ingressVip }
+      # Read ingressVip from Cluster annotation (recommended)
+      address: ${ get .ClusterAnnotations "vip.capi.gorizond.io/ingress-vip" }
+      # Alternative: use label
+      # address: ${ get .ClusterLabels "vip.capi.gorizond.io/ingress-vip" }
+      # Alternative: use variable
+      # address: ${ .ClusterValues.Cluster.spec.topology.variables.ingressVip }
     env:
       vip_interface: ""
       vip_arp: "true"

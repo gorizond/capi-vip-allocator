@@ -354,7 +354,7 @@ func (r *ClusterReconciler) ensureIngressVIP(ctx context.Context, cluster *clust
 		return nil
 	}
 
-	// Set ingress VIP in annotation (not variable!)
+	// Set ingress VIP in annotation and label
 	patchHelper := client.MergeFrom(cluster.DeepCopy())
 
 	if cluster.Annotations == nil {
@@ -362,11 +362,16 @@ func (r *ClusterReconciler) ensureIngressVIP(ctx context.Context, cluster *clust
 	}
 	cluster.Annotations[ingressVipAnnotation] = ip
 
+	if cluster.Labels == nil {
+		cluster.Labels = make(map[string]string)
+	}
+	cluster.Labels[ingressVipAnnotation] = ip
+
 	if err := r.Client.Patch(ctx, cluster, patchHelper); err != nil {
-		return fmt.Errorf("patch cluster ingress VIP annotation: %w", err)
+		return fmt.Errorf("patch cluster ingress VIP annotation and label: %w", err)
 	}
 
-	log.Info("ingress VIP assigned to annotation", "ip", ip, "annotation", ingressVipAnnotation)
+	log.Info("ingress VIP assigned to annotation and label", "ip", ip, "annotation", ingressVipAnnotation)
 	return nil
 }
 

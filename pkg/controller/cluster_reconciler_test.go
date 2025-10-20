@@ -28,6 +28,9 @@ func TestClusterReconciler_Reconcile_SkipsWhenVIPAlreadySet(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-cluster",
 			Namespace: "default",
+			Annotations: map[string]string{
+				ingressEnabledAnnotation: "false", // Disable ingress VIP for this test
+			},
 		},
 		Spec: clusterv1.ClusterSpec{
 			Topology: &clusterv1.Topology{Class: "example"},
@@ -84,6 +87,9 @@ func TestClusterReconciler_Reconcile_RequeuesWhenClaimPending(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-cluster",
 			Namespace: "default",
+			Annotations: map[string]string{
+				ingressEnabledAnnotation: "false", // Disable ingress VIP for this test
+			},
 		},
 		Spec: clusterv1.ClusterSpec{
 			Topology: &clusterv1.Topology{Class: "example"},
@@ -163,6 +169,9 @@ func TestClusterReconciler_Reconcile_AssignsIPAddress_DirectMode(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-cluster",
 			Namespace: "default",
+			Annotations: map[string]string{
+				ingressEnabledAnnotation: "false", // Disable ingress VIP for this test
+			},
 		},
 		Spec: clusterv1.ClusterSpec{
 			Topology: &clusterv1.Topology{Class: "example"},
@@ -244,6 +253,9 @@ func TestClusterReconciler_Reconcile_AssignsIPAddress_LegacyMode(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-cluster-legacy",
 			Namespace: "default",
+			Annotations: map[string]string{
+				ingressEnabledAnnotation: "false", // Disable ingress VIP for this test
+			},
 		},
 		Spec: clusterv1.ClusterSpec{
 			Topology: &clusterv1.Topology{Class: "example-legacy"},
@@ -622,5 +634,90 @@ func TestGetClusterClass_ClusterScoped(t *testing.T) {
 	}
 	if got.Name != "global-class" {
 		t.Fatalf("expected ClusterClass name %q, got %q", "global-class", got.Name)
+	}
+}
+
+func TestEnsureIngressVIP_SetsAnnotationAndLabel(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clusterv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add cluster api scheme: %v", err)
+	}
+	registerIPAMGVKs(scheme)
+
+	cluster := &clusterv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster-ingress",
+			Namespace: "default",
+			// No ingressEnabledAnnotation = default enabled
+		},
+		Spec: clusterv1.ClusterSpec{
+			Topology: &clusterv1.Topology{Class: "example"},
+			ControlPlaneEndpoint: clusterv1.APIEndpoint{
+				Host: "10.0.0.20",
+				Port: 6443,
+			},
+		},
+	}
+
+	// Create both control-plane and ingress pools
+	cpPool := newGlobalPool("pool-cp", map[string]string{
+		clusterClassLabel: "example",
+		roleLabel:         controlPlaneRole,
+	})
+	ingressPool := newGlobalPool("pool-ingress", map[string]string{
+		clusterClassLabel: "example",
+		roleLabel:         ingressRole,
+	})
+
+	// Create ingress claim with IP ready
+	ingressClaim := &unstructured.Unstructured{}
+	ingressClaim.SetGroupVersionKind(schema.GroupVersionKind{Group: ipamGroup, Version: ipamVersion, Kind: ipAddressClaimKind})
+	ingressClaim.SetName("vip-ingress-" + cluster.Name)
+	ingressClaim.SetNamespace(cluster.Namespace)
+	ingressClaim.SetLabels(map[string]string{roleLabel: ingressRole})
+	if err := unstructured.SetNestedField(ingressClaim.Object, map[string]interface{}{
+		"name": "vip-ingress-address",
+	}, "status", "addressRef"); err != nil {
+		t.Fatalf("set ingress claim status: %v", err)
+	}
+
+	ingressIP := newIPAddress("vip-ingress-address", cluster.Namespace, "10.0.0.101")
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(cluster, cpPool, ingressPool, ingressClaim, ingressIP).Build()
+	reconciler := &ClusterReconciler{
+		Client:      client,
+		Scheme:      scheme,
+		Logger:      testr.New(t),
+		DefaultPort: 6443,
+	}
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}}
+
+	// Reconcile should allocate ingress VIP
+	result, err := reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue, got %v", result.RequeueAfter)
+	}
+
+	// Check that cluster has ingress VIP annotation AND label
+	updatedCluster := &clusterv1.Cluster{}
+	if err := client.Get(ctx, req.NamespacedName, updatedCluster); err != nil {
+		t.Fatalf("fetch cluster after reconcile: %v", err)
+	}
+
+	// Check annotation
+	gotAnnotation := updatedCluster.Annotations[ingressVipAnnotation]
+	if gotAnnotation != "10.0.0.101" {
+		t.Fatalf("expected ingress VIP annotation to be 10.0.0.101, got %s", gotAnnotation)
+	}
+
+	// Check label (NEW!)
+	gotLabel := updatedCluster.Labels[ingressVipAnnotation]
+	if gotLabel != "10.0.0.101" {
+		t.Fatalf("expected ingress VIP label to be 10.0.0.101, got %s", gotLabel)
 	}
 }
