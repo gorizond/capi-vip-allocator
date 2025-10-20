@@ -67,7 +67,10 @@ func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehook
 
 	log.Info("GeneratePatches hook called", "items", len(request.Items))
 
-	// Process each item in the request
+	// Map to store allocated IPs: clusterName -> IP
+	allocatedIPs := make(map[string]string)
+
+	// First pass: Process Cluster objects and allocate VIPs
 	for _, item := range request.Items {
 		// Check object type
 		var typeMeta metav1.TypeMeta
@@ -101,6 +104,7 @@ func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehook
 		// Skip if endpoint already set
 		if cluster.Spec.ControlPlaneEndpoint.Host != "" {
 			log.Info("controlPlaneEndpoint already set, skipping", "cluster", cluster.Name, "host", cluster.Spec.ControlPlaneEndpoint.Host)
+			allocatedIPs[cluster.Name] = cluster.Spec.ControlPlaneEndpoint.Host
 			continue
 		}
 
@@ -113,6 +117,7 @@ func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehook
 				"host": existingVIP,
 				"port": defaultPort,
 			})
+			allocatedIPs[cluster.Name] = existingVIP
 			continue
 		}
 
@@ -144,6 +149,9 @@ func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehook
 
 		log.Info("VIP allocated", "cluster", cluster.Name, "ip", ip, "pool", poolName)
 
+		// Store allocated IP
+		allocatedIPs[cluster.Name] = ip
+
 		// Add patch to set controlPlaneEndpoint
 		e.addClusterPatch(response, item.UID, "/spec/controlPlaneEndpoint", map[string]interface{}{
 			"host": ip,
@@ -152,6 +160,55 @@ func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehook
 
 		// Add clusterVip variable to topology
 		e.addClusterVariablePatch(response, item.UID, cluster, "clusterVip", ip)
+	}
+
+	// Second pass: Patch InfrastructureCluster objects with allocated VIPs
+	for _, item := range request.Items {
+		var typeMeta metav1.TypeMeta
+		if err := json.Unmarshal(item.Object.Raw, &typeMeta); err != nil {
+			continue
+		}
+
+		// Check if this is an InfrastructureCluster (any kind ending with "Cluster" in infrastructure group)
+		if typeMeta.Kind == "Cluster" || !isInfrastructureCluster(typeMeta) {
+			continue
+		}
+
+		// Parse object to get cluster owner reference
+		obj := &unstructured.Unstructured{}
+		if err := json.Unmarshal(item.Object.Raw, obj); err != nil {
+			log.Error(err, "failed to unmarshal InfrastructureCluster", "kind", typeMeta.Kind)
+			continue
+		}
+
+		// Try to find cluster name from object name (usually matches cluster name pattern)
+		clusterName := extractClusterName(obj.GetName())
+		if clusterName == "" {
+			continue
+		}
+
+		// Check if we have allocated IP for this cluster
+		ip, exists := allocatedIPs[clusterName]
+		if !exists {
+			continue
+		}
+
+		log.Info("patching InfrastructureCluster", "kind", typeMeta.Kind, "name", obj.GetName(), "cluster", clusterName, "ip", ip)
+
+		// Check if controlPlaneEndpoint exists in spec
+		spec, found, _ := unstructured.NestedMap(obj.Object, "spec")
+		if !found {
+			continue
+		}
+
+		// Check if controlPlaneEndpoint field exists
+		if _, exists := spec["controlPlaneEndpoint"]; exists {
+			// Add patch to set controlPlaneEndpoint
+			e.addGenericPatch(response, item.UID, "/spec/controlPlaneEndpoint", map[string]interface{}{
+				"host": ip,
+				"port": defaultPort,
+			})
+		}
 	}
 
 	response.SetStatus(runtimehooksv1.ResponseStatusSuccess)
@@ -415,4 +472,52 @@ func mustMarshalJSON(v interface{}) []byte {
 		panic(err)
 	}
 	return b
+}
+
+// addGenericPatch adds a patch for any object type (not just Cluster).
+func (e *VIPExtension) addGenericPatch(response *runtimehooksv1.GeneratePatchesResponse, itemUID types.UID, path string, value interface{}) {
+	patch := runtimehooksv1.GeneratePatchesResponseItem{
+		UID:       itemUID,
+		PatchType: runtimehooksv1.JSONPatchType,
+		Patch: mustMarshalJSON([]map[string]interface{}{
+			{
+				"op":    "add",
+				"path":  path,
+				"value": value,
+			},
+		}),
+	}
+	response.Items = append(response.Items, patch)
+}
+
+// isInfrastructureCluster checks if the TypeMeta represents an InfrastructureCluster.
+// Infrastructure clusters are typically in groups like "infrastructure.cluster.x-k8s.io"
+// and have kind names ending with "Cluster" (e.g., ProxmoxCluster, AWSCluster).
+func isInfrastructureCluster(typeMeta metav1.TypeMeta) bool {
+	// Check if APIVersion contains "infrastructure" and Kind ends with "Cluster"
+	if len(typeMeta.APIVersion) == 0 || len(typeMeta.Kind) < 7 {
+		return false
+	}
+
+	// Parse APIVersion to get group
+	gv, err := schema.ParseGroupVersion(typeMeta.APIVersion)
+	if err != nil {
+		return false
+	}
+
+	// Check if group contains "infrastructure" and kind ends with "Cluster"
+	return (gv.Group == "infrastructure.cluster.x-k8s.io" ||
+		len(gv.Group) > 14 && gv.Group[:14] == "infrastructure") &&
+		len(typeMeta.Kind) >= 7 && typeMeta.Kind[len(typeMeta.Kind)-7:] == "Cluster"
+}
+
+// extractClusterName extracts the cluster name from an InfrastructureCluster name.
+// By convention, InfrastructureCluster names match the Cluster name or follow
+// predictable patterns like "<clustername>-<suffix>".
+func extractClusterName(infraClusterName string) string {
+	// In most cases, the InfrastructureCluster name equals the Cluster name
+	// or is a prefix. CAPI topology controller ensures this naming convention.
+	// For now, we simply return the name as-is, assuming it matches.
+	// More sophisticated matching could be added if needed.
+	return infraClusterName
 }
