@@ -113,31 +113,8 @@ func (s *Server) handleGeneratePatches(w http.ResponseWriter, r *http.Request) {
 	s.writeResponse(w, response)
 }
 
-func (s *Server) handleBeforeClusterCreate(w http.ResponseWriter, r *http.Request) {
-	s.logger.Info("BeforeClusterCreate hook called")
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		s.handleError(w, "failed to read request body", err)
-		return
-	}
-	defer r.Body.Close()
-
-	request := &runtimehooksv1.BeforeClusterCreateRequest{}
-	if err := json.Unmarshal(body, request); err != nil {
-		s.handleError(w, "failed to unmarshal request", err)
-		return
-	}
-
-	clusterKey := fmt.Sprintf("%s/%s", request.Cluster.Namespace, request.Cluster.Name)
-	s.logger.Info("BeforeClusterCreate request decoded", "cluster", clusterKey)
-
-	response := &runtimehooksv1.BeforeClusterCreateResponse{}
-	s.extension.BeforeClusterCreate(r.Context(), request, response)
-
-	s.logger.Info("BeforeClusterCreate response prepared", "cluster", clusterKey, "status", response.GetStatus())
-	s.writeResponse(w, response)
-}
+// handleBeforeClusterCreate - REMOVED in v0.4.0
+// BeforeClusterCreate hook cannot modify Cluster object, removed completely
 
 func (s *Server) handleBeforeClusterDelete(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("BeforeClusterDelete hook called")
