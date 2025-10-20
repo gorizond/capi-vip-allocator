@@ -2,6 +2,69 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.11] - 2025-10-20
+
+### Fixed
+
+- 🐛 **Critical bug**: Fixed GeneratePatches hook to correctly patch InfrastructureCluster objects
+  - Previously: Hook tried to extract cluster name from InfrastructureCluster name (unreliable)
+  - Now: Uses `HolderReference.Name` from GeneratePatchesRequestItem to identify parent Cluster
+  - **Impact**: ProxmoxCluster now correctly receives `controlPlaneEndpoint.host` via GeneratePatches hook
+  
+- 🔧 **JSON Patch fix**: Changed operation from "add" to "replace" for controlPlaneEndpoint
+  - Fixes patch application for fields that may already exist in template
+  - More reliable patching for InfrastructureCluster objects
+
+- 📊 **Logging improvements**: Added comprehensive logging to Runtime Extension
+  - All HTTP requests now logged with method, path, status code, and duration
+  - GeneratePatches hook logs each processing step with cluster names and allocated IPs
+  - InfrastructureCluster patching now logs which objects are being patched
+  - Helps diagnose issues with hook invocation and patch application
+
+- 🏥 **Health endpoint**: Added root handler for health checks
+  - Returns JSON response: `{"status":"ok","service":"capi-vip-allocator-runtime-extension"}`
+  - Prevents 404 errors on root path requests
+
+### Added
+
+- HTTP logging middleware for all Runtime Extension requests
+- `responseWriterWrapper` to capture HTTP status codes in logs
+- Detailed logging in `preallocateIP()` for IPAddressClaim creation flow
+- Error handling for race conditions in IPAddressClaim creation
+- Cluster namespace tracking in GeneratePatches for better debugging
+
+### Changed
+
+- Changed log level from `V(1)` (debug) to `Info` for all hook handlers
+  - BeforeClusterCreate, GeneratePatches, BeforeClusterDelete, AfterClusterUpgrade, Discovery
+  - Makes hook invocation visible in default logs
+- Improved error messages in IPAddressClaim allocation
+- Enhanced logging format with structured fields (cluster, namespace, ip, etc.)
+
+### Technical Details
+
+**Root Cause Analysis**:
+The v0.1.10 GeneratePatches implementation had a critical bug where it couldn't reliably identify which Cluster owns an InfrastructureCluster object. It used name-based heuristics (`extractClusterName()`), which failed when:
+- InfrastructureCluster name didn't exactly match Cluster name
+- Multiple clusters had similar naming patterns
+
+**Solution**:
+Use `item.HolderReference.Name` from the GeneratePatchesRequest, which CAPI Runtime SDK provides specifically for this purpose. This reference points directly to the owning Cluster object.
+
+**Testing Notes**:
+After this fix, CAPI logs should show:
+```
+runtime-extension: incoming HTTP request method=POST path=/hooks.runtime.cluster.x-k8s.io/v1alpha1/generatepatches
+GeneratePatches hook called itemsCount=N
+processing cluster name=test-cluster namespace=clusters-proxmox
+VIP allocated cluster=test-cluster ip=10.2.0.20 pool=galileosky-vip
+found InfrastructureCluster kind=ProxmoxCluster name=test-cluster
+patching InfrastructureCluster with VIP clusterName=test-cluster ip=10.2.0.20
+GeneratePatches response prepared status=Success patchesCount=M
+```
+
+---
+
 ## [v0.1.9] - 2025-10-19
 
 ### Fixed

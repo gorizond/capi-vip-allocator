@@ -65,19 +65,24 @@ func (e *VIPExtension) Name() string {
 func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehooksv1.GeneratePatchesRequest, response *runtimehooksv1.GeneratePatchesResponse) {
 	log := e.Logger.WithName("GeneratePatches")
 
-	log.Info("GeneratePatches hook called", "items", len(request.Items))
+	log.Info("GeneratePatches hook called", "itemsCount", len(request.Items))
 
 	// Map to store allocated IPs: clusterName -> IP
 	allocatedIPs := make(map[string]string)
 
+	// Map to store cluster namespace: clusterName -> namespace
+	clusterNamespaces := make(map[string]string)
+
 	// First pass: Process Cluster objects and allocate VIPs
-	for _, item := range request.Items {
+	for i, item := range request.Items {
 		// Check object type
 		var typeMeta metav1.TypeMeta
 		if err := json.Unmarshal(item.Object.Raw, &typeMeta); err != nil {
-			log.Error(err, "failed to unmarshal TypeMeta")
+			log.Error(err, "failed to unmarshal TypeMeta", "itemIndex", i)
 			continue
 		}
+
+		log.V(1).Info("processing item", "itemIndex", i, "kind", typeMeta.Kind, "apiVersion", typeMeta.APIVersion, "uid", item.UID)
 
 		// We only care about Cluster objects
 		if typeMeta.Kind != "Cluster" {
@@ -93,7 +98,7 @@ func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehook
 			return
 		}
 
-		log.Info("processing cluster", "name", cluster.Name, "namespace", cluster.Namespace)
+		log.Info("processing cluster", "name", cluster.Name, "namespace", cluster.Namespace, "uid", item.UID)
 
 		// Skip if no topology
 		if cluster.Spec.Topology == nil || cluster.Spec.Topology.Class == "" {
@@ -101,9 +106,12 @@ func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehook
 			continue
 		}
 
+		// Store cluster namespace for later lookup
+		clusterNamespaces[cluster.Name] = cluster.Namespace
+
 		// Skip if endpoint already set
 		if cluster.Spec.ControlPlaneEndpoint.Host != "" {
-			log.Info("controlPlaneEndpoint already set, skipping", "cluster", cluster.Name, "host", cluster.Spec.ControlPlaneEndpoint.Host)
+			log.Info("controlPlaneEndpoint already set, skipping allocation", "cluster", cluster.Name, "host", cluster.Spec.ControlPlaneEndpoint.Host)
 			allocatedIPs[cluster.Name] = cluster.Spec.ControlPlaneEndpoint.Host
 			continue
 		}
@@ -163,41 +171,58 @@ func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehook
 	}
 
 	// Second pass: Patch InfrastructureCluster objects with allocated VIPs
-	for _, item := range request.Items {
+	for i, item := range request.Items {
 		var typeMeta metav1.TypeMeta
 		if err := json.Unmarshal(item.Object.Raw, &typeMeta); err != nil {
+			log.V(1).Info("failed to unmarshal TypeMeta in second pass", "itemIndex", i, "error", err)
 			continue
 		}
 
 		// Check if this is an InfrastructureCluster (any kind ending with "Cluster" in infrastructure group)
 		if typeMeta.Kind == "Cluster" || !isInfrastructureCluster(typeMeta) {
+			log.V(1).Info("skipping non-InfrastructureCluster", "itemIndex", i, "kind", typeMeta.Kind)
 			continue
 		}
 
-		// Parse object to get cluster owner reference
+		// Parse object to get metadata
 		obj := &unstructured.Unstructured{}
 		if err := json.Unmarshal(item.Object.Raw, obj); err != nil {
-			log.Error(err, "failed to unmarshal InfrastructureCluster", "kind", typeMeta.Kind)
+			log.Error(err, "failed to unmarshal InfrastructureCluster", "kind", typeMeta.Kind, "itemIndex", i)
 			continue
 		}
 
-		// Try to find cluster name from object name (usually matches cluster name pattern)
-		clusterName := extractClusterName(obj.GetName())
+		log.Info("found InfrastructureCluster", "kind", typeMeta.Kind, "name", obj.GetName(), "namespace", obj.GetNamespace(), "uid", item.UID)
+
+		// Get cluster name from HolderReference (this is the Cluster that owns this object)
+		// HolderReference points to the Cluster object in topology reconciliation
+		var clusterName string
+		if item.HolderReference.Name != "" {
+			clusterName = item.HolderReference.Name
+			log.Info("using HolderReference for cluster name", "infraCluster", obj.GetName(), "clusterName", clusterName)
+		} else {
+			// Fallback: try to extract from object name (usually matches cluster name)
+			clusterName = extractClusterName(obj.GetName())
+			log.Info("using extracted cluster name from object name", "infraCluster", obj.GetName(), "clusterName", clusterName)
+		}
+
 		if clusterName == "" {
+			log.Info("could not determine cluster name, skipping", "infraCluster", obj.GetName())
 			continue
 		}
 
 		// Check if we have allocated IP for this cluster
 		ip, exists := allocatedIPs[clusterName]
 		if !exists {
+			log.Info("no VIP allocated for this cluster yet, skipping patch", "infraCluster", obj.GetName(), "clusterName", clusterName)
 			continue
 		}
 
-		log.Info("patching InfrastructureCluster", "kind", typeMeta.Kind, "name", obj.GetName(), "cluster", clusterName, "ip", ip)
+		log.Info("patching InfrastructureCluster with VIP", "kind", typeMeta.Kind, "name", obj.GetName(), "clusterName", clusterName, "ip", ip)
 
 		// Check if controlPlaneEndpoint exists in spec
 		spec, found, _ := unstructured.NestedMap(obj.Object, "spec")
 		if !found {
+			log.Info("spec not found in InfrastructureCluster, skipping", "infraCluster", obj.GetName())
 			continue
 		}
 
@@ -208,6 +233,9 @@ func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehook
 				"host": ip,
 				"port": defaultPort,
 			})
+			log.Info("added patch for InfrastructureCluster", "infraCluster", obj.GetName(), "path", "/spec/controlPlaneEndpoint", "ip", ip)
+		} else {
+			log.Info("controlPlaneEndpoint field not found in spec, skipping", "infraCluster", obj.GetName())
 		}
 	}
 
@@ -293,7 +321,7 @@ func (e *VIPExtension) findPool(ctx context.Context, className, role string) (st
 }
 
 func (e *VIPExtension) preallocateIP(ctx context.Context, cluster *clusterv1.Cluster, claimName, poolName string) (string, error) {
-	log := e.Logger.WithValues("cluster", cluster.Name, "claim", claimName, "pool", poolName)
+	log := e.Logger.WithValues("cluster", cluster.Name, "namespace", cluster.Namespace, "claim", claimName, "pool", poolName)
 
 	// Check if claim already exists
 	claimGVK := schema.GroupVersionKind{Group: ipamGroup, Version: ipamVersion, Kind: ipAddressClaimKind}
@@ -306,12 +334,18 @@ func (e *VIPExtension) preallocateIP(ctx context.Context, cluster *clusterv1.Clu
 	err := e.Client.Get(ctx, namespacedName, claim)
 	if err == nil {
 		// Claim exists, check if IP is ready
-		log.V(1).Info("IPAddressClaim already exists, checking for IP")
+		log.Info("IPAddressClaim already exists, checking for allocated IP")
 		return e.waitForIPAllocation(ctx, cluster.Namespace, namespacedName, claim)
 	}
 
+	if !errors.IsNotFound(err) {
+		// Unexpected error
+		log.Error(err, "failed to get IPAddressClaim")
+		return "", fmt.Errorf("get IPAddressClaim: %w", err)
+	}
+
 	// Create new claim (without ownerReference - Cluster doesn't exist in etcd yet!)
-	log.Info("Creating new IPAddressClaim")
+	log.Info("IPAddressClaim not found, creating new one")
 	claim.SetName(claimName)
 	claim.SetNamespace(cluster.Namespace)
 	claim.SetLabels(map[string]string{
@@ -329,10 +363,16 @@ func (e *VIPExtension) preallocateIP(ctx context.Context, cluster *clusterv1.Clu
 	}
 
 	if err := e.Client.Create(ctx, claim); err != nil {
+		if errors.IsAlreadyExists(err) {
+			// Race condition: another reconciler created it
+			log.Info("IPAddressClaim was created by another process, fetching it")
+			return e.waitForIPAllocation(ctx, cluster.Namespace, namespacedName, nil)
+		}
+		log.Error(err, "failed to create IPAddressClaim")
 		return "", fmt.Errorf("create IPAddressClaim: %w", err)
 	}
 
-	log.Info("IPAddressClaim created, waiting for IP allocation")
+	log.Info("IPAddressClaim created successfully, waiting for IP allocation")
 	// Wait for IP to be allocated with retry
 	return e.waitForIPAllocation(ctx, cluster.Namespace, namespacedName, nil)
 }
@@ -475,13 +515,16 @@ func mustMarshalJSON(v interface{}) []byte {
 }
 
 // addGenericPatch adds a patch for any object type (not just Cluster).
+// Uses "replace" operation to handle both new and existing fields.
 func (e *VIPExtension) addGenericPatch(response *runtimehooksv1.GeneratePatchesResponse, itemUID types.UID, path string, value interface{}) {
+	// Use "replace" instead of "add" - it works for both existing and new fields
+	// in the context of strategic merge patch
 	patch := runtimehooksv1.GeneratePatchesResponseItem{
 		UID:       itemUID,
 		PatchType: runtimehooksv1.JSONPatchType,
 		Patch: mustMarshalJSON([]map[string]interface{}{
 			{
-				"op":    "add",
+				"op":    "replace",
 				"path":  path,
 				"value": value,
 			},

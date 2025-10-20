@@ -43,9 +43,12 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/hooks.runtime.cluster.x-k8s.io/v1alpha1/afterclusterupgrade", s.handleAfterClusterUpgrade)
 	mux.HandleFunc("/hooks.runtime.cluster.x-k8s.io/v1alpha1/discovery", s.handleDiscovery)
 
+	// Add root handler for health checks
+	mux.HandleFunc("/", s.handleRoot)
+
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.port),
-		Handler: mux,
+		Handler: s.loggingMiddleware(mux),
 	}
 
 	s.logger.Info("starting runtime extension server", "port", s.port, "certDir", s.certDir)
@@ -78,7 +81,7 @@ func (s *Server) NeedLeaderElection() bool {
 }
 
 func (s *Server) handleGeneratePatches(w http.ResponseWriter, r *http.Request) {
-	s.logger.V(1).Info("GeneratePatches hook called")
+	s.logger.Info("GeneratePatches hook called")
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -93,14 +96,17 @@ func (s *Server) handleGeneratePatches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.logger.Info("GeneratePatches request decoded", "itemsCount", len(request.Items))
+
 	response := &runtimehooksv1.GeneratePatchesResponse{}
 	s.extension.GeneratePatches(r.Context(), request, response)
 
+	s.logger.Info("GeneratePatches response prepared", "status", response.GetStatus(), "patchesCount", len(response.Items))
 	s.writeResponse(w, response)
 }
 
 func (s *Server) handleBeforeClusterCreate(w http.ResponseWriter, r *http.Request) {
-	s.logger.V(1).Info("BeforeClusterCreate hook called")
+	s.logger.Info("BeforeClusterCreate hook called")
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -115,14 +121,18 @@ func (s *Server) handleBeforeClusterCreate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	clusterKey := fmt.Sprintf("%s/%s", request.Cluster.Namespace, request.Cluster.Name)
+	s.logger.Info("BeforeClusterCreate request decoded", "cluster", clusterKey)
+
 	response := &runtimehooksv1.BeforeClusterCreateResponse{}
 	s.extension.BeforeClusterCreate(r.Context(), request, response)
 
+	s.logger.Info("BeforeClusterCreate response prepared", "cluster", clusterKey, "status", response.GetStatus())
 	s.writeResponse(w, response)
 }
 
 func (s *Server) handleBeforeClusterDelete(w http.ResponseWriter, r *http.Request) {
-	s.logger.V(1).Info("BeforeClusterDelete hook called")
+	s.logger.Info("BeforeClusterDelete hook called")
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -137,14 +147,18 @@ func (s *Server) handleBeforeClusterDelete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	clusterKey := fmt.Sprintf("%s/%s", request.Cluster.Namespace, request.Cluster.Name)
+	s.logger.Info("BeforeClusterDelete request decoded", "cluster", clusterKey)
+
 	response := &runtimehooksv1.BeforeClusterDeleteResponse{}
 	s.extension.BeforeClusterDelete(r.Context(), request, response)
 
+	s.logger.Info("BeforeClusterDelete response prepared", "cluster", clusterKey, "status", response.GetStatus())
 	s.writeResponse(w, response)
 }
 
 func (s *Server) handleAfterClusterUpgrade(w http.ResponseWriter, r *http.Request) {
-	s.logger.V(1).Info("AfterClusterUpgrade hook called")
+	s.logger.Info("AfterClusterUpgrade hook called")
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -159,14 +173,18 @@ func (s *Server) handleAfterClusterUpgrade(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	clusterKey := fmt.Sprintf("%s/%s", request.Cluster.Namespace, request.Cluster.Name)
+	s.logger.Info("AfterClusterUpgrade request decoded", "cluster", clusterKey)
+
 	response := &runtimehooksv1.AfterClusterUpgradeResponse{}
 	s.extension.AfterClusterUpgrade(r.Context(), request, response)
 
+	s.logger.Info("AfterClusterUpgrade response prepared", "cluster", clusterKey, "status", response.GetStatus())
 	s.writeResponse(w, response)
 }
 
 func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
-	s.logger.V(1).Info("Discovery hook called")
+	s.logger.Info("Discovery hook called")
 
 	failPolicyFail := runtimehooksv1.FailurePolicyFail
 	failPolicyIgnore := runtimehooksv1.FailurePolicyIgnore
@@ -230,4 +248,53 @@ func (s *Server) writeResponse(w http.ResponseWriter, response interface{}) {
 
 func ptrInt32(i int32) *int32 {
 	return &i
+}
+
+// loggingMiddleware logs all incoming HTTP requests.
+func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		s.logger.Info("runtime-extension: incoming HTTP request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"remoteAddr", r.RemoteAddr,
+			"userAgent", r.UserAgent())
+
+		// Create a response writer wrapper to capture status code
+		wrapped := &responseWriterWrapper{ResponseWriter: w, statusCode: http.StatusOK}
+
+		next.ServeHTTP(wrapped, r)
+
+		duration := time.Since(start)
+		s.logger.Info("runtime-extension: HTTP request completed",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", wrapped.statusCode,
+			"duration", duration.String())
+	})
+}
+
+// responseWriterWrapper wraps http.ResponseWriter to capture status code.
+type responseWriterWrapper struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *responseWriterWrapper) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+// handleRoot handles requests to the root path (for health checks).
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		s.logger.Info("runtime-extension: 404 not found", "path", r.URL.Path)
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `{"status":"ok","service":"capi-vip-allocator-runtime-extension"}`)
 }
