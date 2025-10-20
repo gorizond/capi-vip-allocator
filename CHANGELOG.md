@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.4.1] - 2025-10-20
+
+### Fixed
+
+- Removed handleBeforeClusterCreate method from server.go (compilation fix)
+- GitHub Actions build failure: "s.extension.BeforeClusterCreate undefined"
+- v0.4.0 removed BeforeClusterCreate from extension.go but forgot to remove handler method
+
+---
+
 ## [v0.4.0] - 2025-10-20
 
 ### 🚀 Major: Correct Architecture - GeneratePatches is the ONLY hook
