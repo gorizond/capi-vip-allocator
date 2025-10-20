@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.3.2] - 2025-10-20
+
+### Fixed
+
+- 🔴 **Critical bug**: Fixed BeforeClusterCreate hook timeout validation error
+  - **Problem**: CAPI Runtime SDK validation requires hook timeouts to be ≤ 30 seconds
+  - **v0.3.0/v0.3.1**: Set BeforeClusterCreate timeout to 60s → **discovery failed**
+  - **v0.3.2**: Reduced to 30s (CAPI maximum allowed)
+  - **Error message**: `"handler vip-allocator-before-create timeoutSeconds 60 must be between 0 and 30"`
+  
+- Adjusted VIP allocation wait timeout accordingly:
+  - `beforeCreateIPTimeout`: 55s → 25s (must be < hook timeout of 30s)
+  - Still sufficient for IPAM to allocate IP from pool
+  
+### Technical Details
+
+**CAPI Runtime SDK Constraints**:
+- All hook timeouts must be between 0 and 30 seconds (enforced by validation)
+- Exceeding this limit causes ExtensionConfig discovery failure
+- Extension handlers not registered until validation passes
+
+**Impact of v0.3.0/v0.3.1 Bug**:
+- ExtensionConfig status: `Discovered: False`
+- BeforeClusterCreate hook: NOT registered with CAPI
+- VIP allocation: NOT working (hook never called)
+- Result: Clusters created without VIP, validation failures
+
+**v0.3.2 Fix**:
+- BeforeClusterCreate timeout: 60s → 30s ✅
+- IP allocation wait: 55s → 25s ✅
+- ExtensionConfig validation: passes ✅
+- Hooks: properly registered ✅
+
+---
+
 ## [v0.3.1] - 2025-10-20
 
 ### Fixed

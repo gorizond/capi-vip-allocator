@@ -36,7 +36,7 @@ const (
 	ipAllocationInterval = 500 * time.Millisecond
 
 	// BeforeClusterCreate hook timeout settings
-	beforeCreateIPTimeout  = 55 * time.Second // Must be less than hook timeout (60s)
+	beforeCreateIPTimeout  = 25 * time.Second // Must be less than hook timeout (30s max allowed by CAPI)
 	beforeCreateIPInterval = 1 * time.Second  // Slightly longer interval for this hook
 )
 
