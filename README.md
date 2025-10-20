@@ -160,6 +160,102 @@ Deployment args:
 - `--leader-elect` - Enable leader election
 - `--default-port=6443` - Default control plane port
 
+## ClusterClass Integration
+
+### Important: Avoid Race Conditions
+
+The operator uses **GeneratePatches hook** to populate VIP before infrastructure objects are created. This means you should **NOT** copy `Cluster.spec.controlPlaneEndpoint.host` in your ClusterClass patches.
+
+#### ❌ Incorrect Pattern (causes race condition)
+
+```yaml
+# DO NOT USE - this copies empty value before VIP is allocated
+patches:
+  - name: set-vip-on-infrastructure-cluster
+    definitions:
+      - jsonPatches:
+          - op: replace
+            path: /spec/template/spec/controlPlaneEndpoint/host
+            valueFrom:
+              template: "{{ .builtin.cluster.spec.controlPlaneEndpoint.host }}"
+        selector:
+          apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+          kind: ProxmoxClusterTemplate  # or any InfrastructureClusterTemplate
+          matchResources:
+            infrastructureCluster: true
+```
+
+**Why this fails:**
+1. ClusterClass patches run **before** GeneratePatches hook
+2. At that moment `Cluster.spec.controlPlaneEndpoint.host` is still empty
+3. Infrastructure webhook rejects empty endpoint
+4. Cluster creation fails with validation error
+
+#### ✅ Correct Pattern
+
+Use `.builtin.controlPlane.endpoint.host` instead - this value is already populated by the operator:
+
+```yaml
+# CORRECT - uses controlPlane.endpoint which is populated by operator
+patches:
+  - name: set-control-plane-registration
+    definitions:
+      - jsonPatches:
+          - op: replace
+            path: /spec/template/spec/registrationAddress
+            valueFrom:
+              template: "{{ .builtin.controlPlane.endpoint.host }}"
+        selector:
+          apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+          kind: RKE2ControlPlaneTemplate
+
+  - name: set-control-plane-tls-san
+    definitions:
+      - jsonPatches:
+          - op: add
+            path: /spec/template/spec/tlsSAN/-
+            valueFrom:
+              template: "{{ .builtin.controlPlane.endpoint.host }}"
+        selector:
+          apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+          kind: RKE2ControlPlaneTemplate
+```
+
+### GeneratePatches Hook Behavior
+
+The operator's GeneratePatches hook:
+
+1. **Executes after** all ClusterClass patches are applied
+2. **Allocates VIP** from IP pool (with retry, max 25s)
+3. **Patches multiple objects** in one response:
+   - `Cluster.spec.controlPlaneEndpoint.host`
+   - `InfrastructureCluster.spec.controlPlaneEndpoint.host` (if exists in template)
+   - Any other objects that need the VIP
+
+4. **Returns patches** to CAPI controller
+5. **All objects** are created with correct VIP already set
+
+This eliminates the need for ClusterClass-level copying of the endpoint.
+
+### InfrastructureClusterTemplate Configuration
+
+Your infrastructure cluster template should have **empty** host:
+
+```yaml
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: ProxmoxClusterTemplate  # or your provider
+metadata:
+  name: my-cluster-template
+spec:
+  template:
+    spec:
+      controlPlaneEndpoint:
+        host: ""    # ✅ Empty - will be filled by operator's GeneratePatches hook
+        port: 6443  # ✅ Port can be static
+```
+
+The operator will automatically populate the `host` field for both Cluster and InfrastructureCluster objects.
+
 ## Troubleshooting
 
 ### ExtensionConfig not found
@@ -204,6 +300,42 @@ Check cert-manager:
 ```bash
 kubectl get pods -n cert-manager
 ```
+
+### InfrastructureCluster validation error
+
+```
+Error: failed to create ProxmoxCluster.infrastructure.cluster.x-k8s.io: 
+FieldValueInvalid: spec.controlplaneEndpoint: 
+Invalid value: "<no value>": provided endpoint address is not a valid IP or FQDN
+```
+
+**Причина:** Race condition - ClusterClass патч пытается скопировать `Cluster.spec.controlPlaneEndpoint.host` до того, как оператор выделит VIP.
+
+**Решение:**
+
+1. **Удалите конфликтующий патч** из ClusterClass:
+   ```yaml
+   # Удалить патч, который копирует .builtin.cluster.spec.controlPlaneEndpoint.host
+   # в InfrastructureCluster
+   ```
+
+2. **Используйте правильный синтаксис** для других патчей:
+   ```yaml
+   # ✅ Правильно - использует .builtin.controlPlane.endpoint
+   valueFrom:
+     template: "{{ .builtin.controlPlane.endpoint.host }}"
+   
+   # ❌ Неправильно - использует .builtin.cluster.spec
+   valueFrom:
+     template: "{{ .builtin.cluster.spec.controlPlaneEndpoint.host }}"
+   ```
+
+3. **Проверьте логи** оператора:
+   ```bash
+   kubectl logs -n capi-system -l control-plane=capi-vip-allocator-controller-manager -f
+   ```
+
+См. раздел [ClusterClass Integration](#clusterclass-integration) для подробностей.
 
 ## Architecture
 
