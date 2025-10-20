@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.6.1] - 2025-10-20
+
+### Changed
+
+- **Ingress VIP stored in annotation** (not variable!)
+  - Writes to `metadata.annotations["vip.capi.gorizond.io/ingress-vip"]`
+  - Simpler: no need to define `ingressVip` variable in ClusterClass
+  - Fleet GitRepo reads from `${ .ClusterValues.Cluster.metadata.annotations["vip.capi.gorizond.io/ingress-vip"] }`
+
+**Migration from v0.6.0:**
+- Remove `ingressVip` variable from ClusterClass.spec.variables
+- Update kube-vip-ingress config to read from annotation (not variable)
+
+---
+
 ## [v0.6.0] - 2025-10-20
 
 ### 🚀 New Feature: Ingress VIP Support

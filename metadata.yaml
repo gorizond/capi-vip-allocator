@@ -4,3 +4,4 @@ releaseSeries:
   - major: 0
     minor: 6
     contract: v1beta1
+    patch: 1

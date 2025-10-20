@@ -25,6 +25,7 @@ const (
 	clusterClassLabel        = "vip.capi.gorizond.io/cluster-class"
 	roleLabel                = "vip.capi.gorizond.io/role"
 	ingressEnabledAnnotation = "vip.capi.gorizond.io/ingress-enabled"
+	ingressVipAnnotation     = "vip.capi.gorizond.io/ingress-vip"
 	ipamGroup                = "ipam.cluster.x-k8s.io"
 	ipamVersion              = "v1beta1"  // for IPAddressClaim and IPAddress
 	globalPoolAPIVersion     = "v1alpha2" // for GlobalInClusterIPPool
@@ -327,24 +328,12 @@ func (r *ClusterReconciler) hasClusterVipVariable(clusterClass *clusterv1.Cluste
 	return false
 }
 
-// hasIngressVipVariable checks if the ClusterClass defines an ingressVip variable.
-func (r *ClusterReconciler) hasIngressVipVariable(clusterClass *clusterv1.ClusterClass) bool {
-	for _, variable := range clusterClass.Spec.Variables {
-		if variable.Name == "ingressVip" {
-			return true
-		}
-	}
-	return false
-}
-
-// ensureIngressVIP allocates and sets Ingress VIP for the cluster.
+// ensureIngressVIP allocates and sets Ingress VIP annotation for the cluster.
 func (r *ClusterReconciler) ensureIngressVIP(ctx context.Context, cluster *clusterv1.Cluster, log logr.Logger) error {
-	// Check if ingressVip variable already set
-	for _, v := range cluster.Spec.Topology.Variables {
-		if v.Name == "ingressVip" && string(v.Value.Raw) != `""` && string(v.Value.Raw) != "" {
-			log.V(1).Info("ingressVip already set, skipping allocation", "value", string(v.Value.Raw))
-			return nil
-		}
+	// Check if ingress VIP annotation already set
+	if existingVip, ok := cluster.Annotations[ingressVipAnnotation]; ok && existingVip != "" {
+		log.V(1).Info("ingress VIP annotation already set, skipping allocation", "vip", existingVip)
+		return nil
 	}
 
 	claimName := fmt.Sprintf("vip-ingress-%s", cluster.Name)
@@ -365,41 +354,19 @@ func (r *ClusterReconciler) ensureIngressVIP(ctx context.Context, cluster *clust
 		return nil
 	}
 
-	// Check if ClusterClass defines ingressVip variable
-	clusterClass, err := r.getClusterClass(ctx, cluster.Spec.Topology.Class, cluster.Namespace)
-	if err != nil {
-		return fmt.Errorf("get ClusterClass: %w", err)
-	}
-
-	if !r.hasIngressVipVariable(clusterClass) {
-		log.V(1).Info("ClusterClass doesn't define ingressVip variable, skipping")
-		return nil
-	}
-
-	// Update or add ingressVip variable
+	// Set ingress VIP in annotation (not variable!)
 	patchHelper := client.MergeFrom(cluster.DeepCopy())
 
-	found := false
-	for i := range cluster.Spec.Topology.Variables {
-		if cluster.Spec.Topology.Variables[i].Name == "ingressVip" {
-			cluster.Spec.Topology.Variables[i].Value.Raw = []byte(fmt.Sprintf("%q", ip))
-			found = true
-			break
-		}
+	if cluster.Annotations == nil {
+		cluster.Annotations = make(map[string]string)
 	}
-
-	if !found {
-		cluster.Spec.Topology.Variables = append(cluster.Spec.Topology.Variables, clusterv1.ClusterVariable{
-			Name:  "ingressVip",
-			Value: apiextensionsv1.JSON{Raw: []byte(fmt.Sprintf("%q", ip))},
-		})
-	}
+	cluster.Annotations[ingressVipAnnotation] = ip
 
 	if err := r.Client.Patch(ctx, cluster, patchHelper); err != nil {
-		return fmt.Errorf("patch cluster ingressVip variable: %w", err)
+		return fmt.Errorf("patch cluster ingress VIP annotation: %w", err)
 	}
 
-	log.Info("ingress VIP assigned", "ip", ip)
+	log.Info("ingress VIP assigned to annotation", "ip", ip, "annotation", ingressVipAnnotation)
 	return nil
 }
 
