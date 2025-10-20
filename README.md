@@ -83,11 +83,9 @@ spec:
 EOF
 ```
 
-3. **cert-manager installed** (for Runtime Extension TLS - optional if using reconciler only)
+3. **cert-manager installed** (optional, only needed if Runtime Extensions are enabled)
 
-```bash
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.0/cert-manager.yaml
-```
+> **Note:** v0.5.0+ uses reconcile controller (not Runtime Extensions) by default. cert-manager is only needed for TLS certificates if you enable Runtime Extensions with `--enable-runtime-extension=true`.
 
 ### Installation
 
