@@ -25,9 +25,9 @@ spec:
           image: ghcr.io/gorizond/capi-vip-allocator:dev
           args:
             - "--leader-elect"
-            - "--enable-runtime-extension=true"
+            - "--enable-runtime-extension=false"
             - "--runtime-extension-port=9443"
-            - "--enable-reconciler=false"
+            - "--enable-reconciler=true"
           imagePullPolicy: IfNotPresent
           livenessProbe:
             httpGet:
