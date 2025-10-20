@@ -36,6 +36,7 @@ func main() {
 		runtimeExtPort       int
 		enableRuntimeExt     bool
 		runtimeExtName       string
+		enableReconciler     bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
@@ -43,8 +44,9 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
 	flag.IntVar(&defaultPort, "default-port", 6443, "Default control plane port to set when absent.")
 	flag.IntVar(&runtimeExtPort, "runtime-extension-port", 9443, "The port for the runtime extension server.")
-	flag.BoolVar(&enableRuntimeExt, "enable-runtime-extension", false, "Enable CAPI Runtime Extension server for BeforeClusterCreate hook.")
+	flag.BoolVar(&enableRuntimeExt, "enable-runtime-extension", true, "Enable CAPI Runtime Extension server for BeforeClusterCreate hook.")
 	flag.StringVar(&runtimeExtName, "runtime-extension-name", "vip-allocator", "The name of the runtime extension handler (must not contain dots).")
+	flag.BoolVar(&enableReconciler, "enable-reconciler", false, "Enable reconciler controller (fallback mode, not recommended with runtime extension).")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -67,16 +69,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	reconciler := &controller.ClusterReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		Logger:      ctrl.Log.WithName("controllers").WithName("Cluster"),
-		DefaultPort: int32(defaultPort),
-	}
+	// Start Reconciler controller only if explicitly enabled
+	// WARNING: Reconciler creates race condition with BeforeClusterCreate hook
+	// Only use reconciler for clusters created without runtime extension
+	if enableReconciler {
+		setupLog.Info("reconciler enabled - this may cause race conditions with runtime extension!")
+		reconciler := &controller.ClusterReconciler{
+			Client:      mgr.GetClient(),
+			Scheme:      mgr.GetScheme(),
+			Logger:      ctrl.Log.WithName("controllers").WithName("Cluster"),
+			DefaultPort: int32(defaultPort),
+		}
 
-	if err := reconciler.SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Cluster")
-		os.Exit(1)
+		if err := reconciler.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "Cluster")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("reconciler disabled - VIP allocation via BeforeClusterCreate hook only")
 	}
 
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
@@ -88,7 +98,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start Runtime Extension server if enabled
+	// Start Runtime Extension server (required for VIP allocation)
 	if enableRuntimeExt {
 		setupLog.Info("runtime extension enabled", "port", runtimeExtPort, "name", runtimeExtName)
 		certDir := "/tmp/runtime-extension/serving-certs"
@@ -99,7 +109,7 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		setupLog.Info("runtime extension disabled - using reconciler-only mode")
+		setupLog.Info("runtime extension disabled - no VIP allocation will occur!")
 	}
 
 	setupLog.Info("starting manager")

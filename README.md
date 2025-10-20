@@ -4,33 +4,52 @@ Automatic Virtual IP allocation for Cluster API clusters using Runtime Extension
 
 ## Features
 
-- **Zero race condition** - VIP allocated BEFORE Cluster is written to etcd
+- **Zero race condition** - VIP allocated synchronously in BeforeClusterCreate hook (v0.3.0+)
+- **Single source of truth** - BeforeClusterCreate is the ONLY VIP allocation mechanism
+- **No reconcile loop** - Eliminates async race condition with topology controller
 - **Automatic allocation** - IP from IPAM pool based on ClusterClass labels
-- **Automatic cleanup** - IP released when Cluster is deleted
+- **Automatic cleanup** - IP released when Cluster is deleted via ownerReferences
 - **CAPI native** - Uses Runtime Extensions API
-- **Production ready** - TLS, health checks, metrics
+- **Production ready** - TLS, health checks, strict validation
 
-## How it works
+## How it works (v0.3.0+)
+
+**Two-phase synchronous VIP allocation:**
 
 ```
+Phase 1: BeforeClusterCreate Hook (PRIMARY - VIP Allocation)
 Client creates Cluster (host: "")
          ↓
-CAPI Topology Controller calls GeneratePatches hook
+CAPI calls BeforeClusterCreate hook SYNCHRONOUSLY
          ↓
 VIP Allocator Extension
   1. Finds IP pool by cluster-class label
   2. Creates IPAddressClaim (without ownerRef - Cluster not in etcd yet)
-  3. Waits for IPAM to allocate IP (retry every 500ms, max 25s)
-  4. Returns patch: {host: "10.2.0.20"}
+  3. Waits for IPAM to allocate IP (retry every 1s, max 55s)
+  4. Sets request.Cluster.Spec.ControlPlaneEndpoint.Host = "10.2.0.20"
          ↓
 Cluster saved to etcd WITH IP ✅
+
+Phase 2: GeneratePatches Hook (SECONDARY - Infrastructure Patching)
+CAPI Topology Controller starts rendering
          ↓
-InfrastructureCluster created successfully ✅
+CAPI calls GeneratePatches hook SYNCHRONOUSLY
          ↓
-Reconciler adopts IPAddressClaim (adds ownerReference)
+VIP Allocator Extension
+  1. Reads VIP from Cluster.Spec.ControlPlaneEndpoint.Host
+  2. Patches ProxmoxCluster.spec.controlPlaneEndpoint.host = "10.2.0.20"
+         ↓
+ProxmoxCluster created WITH correct VIP ✅
+         ↓
+ClusterClass patches use {{ .builtin.controlPlane.endpoint.host }} for RKE2ControlPlane ✅
          ↓
 Cleanup on delete: ownerReference ensures IPAddressClaim is deleted ✅
 ```
+
+**Key difference from v0.2.x:** 
+- ✅ BeforeClusterCreate allocates VIP BEFORE Cluster is saved to etcd
+- ✅ GeneratePatches patches InfrastructureCluster with VIP from Cluster
+- ❌ No reconcile loop! (was source of race condition in v0.2.x)
 
 ## Quick Start
 
@@ -48,7 +67,7 @@ kubectl patch deployment capi-controller-manager -n capi-system --type=json -p '
 2. **cert-manager installed**
 
 ```bash
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.0/cert-manager.yaml
 ```
 
 3. **IPAM provider** (in-cluster or other)
@@ -65,9 +84,9 @@ metadata:
   namespace: capi-system
 spec:
   type: addon  # Runtime Extension providers use 'addon' type
-  version: v0.1.9
+  version: v0.3.0
   fetchConfig:
-    url: https://github.com/gorizond/capi-vip-allocator/releases/download/v0.1.9/capi-vip-allocator.yaml
+    url: https://github.com/gorizond/capi-vip-allocator/releases/download/v0.3.0/capi-vip-allocator.yaml
 ```
 
 **Note:** Runtime Extensions are registered via `ExtensionConfig` resource (included in the manifest), not through CAPIProvider type.
@@ -75,7 +94,7 @@ spec:
 Or directly:
 
 ```bash
-kubectl apply -f https://github.com/gorizond/capi-vip-allocator/releases/download/v0.1.9/capi-vip-allocator.yaml
+kubectl apply -f https://github.com/gorizond/capi-vip-allocator/releases/download/v0.3.0/capi-vip-allocator.yaml
 ```
 
 ### Create IP Pool
@@ -105,7 +124,7 @@ metadata:
 spec:
   topology:
     class: my-cluster-class
-    version: v1.30.0
+    version: v1.31.0
     controlPlane:
       replicas: 3
     workers:
@@ -152,13 +171,16 @@ spec:
 
 ### Runtime Extension Options
 
-Deployment args:
+Deployment args (v0.3.0+):
 
-- `--enable-runtime-extension=true` - Enable Runtime Extension mode (default: true)
+- `--enable-runtime-extension=true` - Enable Runtime Extension mode (default: true, REQUIRED)
+- `--enable-reconciler=false` - Enable reconcile controller (default: false, NOT RECOMMENDED - causes race condition)
 - `--runtime-extension-port=9443` - Runtime Extension server port
 - `--runtime-extension-name=vip-allocator` - Name of the runtime extension handler (must not contain dots, default: vip-allocator)
 - `--leader-elect` - Enable leader election
 - `--default-port=6443` - Default control plane port
+
+**Important:** In v0.3.0+, the reconcile controller is disabled by default to prevent race conditions. All VIP allocation is done synchronously in BeforeClusterCreate hook.
 
 ## ClusterClass Integration
 
@@ -221,21 +243,36 @@ patches:
           kind: RKE2ControlPlaneTemplate
 ```
 
-### GeneratePatches Hook Behavior
+### Hook Architecture (v0.3.0+)
 
-The operator's GeneratePatches hook:
+The operator uses two synchronous hooks in sequence:
 
-1. **Executes after** all ClusterClass patches are applied
-2. **Allocates VIP** from IP pool (with retry, max 25s)
-3. **Patches multiple objects** in one response:
-   - `Cluster.spec.controlPlaneEndpoint.host`
-   - `InfrastructureCluster.spec.controlPlaneEndpoint.host` (if exists in template)
-   - Any other objects that need the VIP
+#### 1. BeforeClusterCreate Hook (Phase 1 - VIP Allocation)
 
+1. **Executes BEFORE** Cluster is written to etcd (synchronous, blocking)
+2. **Allocates VIP** from IP pool (with retry, max 55s)
+3. **Creates IPAddressClaim** (without ownerReference - Cluster not in etcd yet)
+4. **Waits for IPAM** to allocate IP address
+5. **Sets VIP directly** in request object:
+   - `request.Cluster.Spec.ControlPlaneEndpoint.Host = "10.2.0.20"`
+6. **Returns success** to CAPI controller
+7. **Cluster created** in etcd with VIP already set ✅
+
+#### 2. GeneratePatches Hook (Phase 2 - Infrastructure Patching)
+
+1. **Executes AFTER** Cluster exists in etcd (synchronous, fast)
+2. **Reads VIP** from Cluster.Spec.ControlPlaneEndpoint.Host
+3. **Patches InfrastructureCluster** (e.g., ProxmoxCluster):
+   - `ProxmoxCluster.spec.controlPlaneEndpoint.host = "10.2.0.20"`
 4. **Returns patches** to CAPI controller
-5. **All objects** are created with correct VIP already set
+5. **InfrastructureCluster created** with correct VIP ✅
+6. **Topology controller** renders other objects with `{{ .builtin.controlPlane.endpoint.host }}`
 
-This eliminates the need for ClusterClass-level copying of the endpoint.
+**Why v0.3.0 is better than v0.2.x:**
+- ✅ **Two-phase synchronous** - BeforeClusterCreate allocates, GeneratePatches patches
+- ✅ **No reconcile loop** - eliminated async race condition
+- ✅ **InfrastructureCluster support** - GeneratePatches patches ProxmoxCluster correctly
+- ❌ **v0.2.x problem** - reconciler ran asynchronously, topology controller used empty VIP
 
 ### InfrastructureClusterTemplate Configuration
 
@@ -337,14 +374,19 @@ Invalid value: "<no value>": provided endpoint address is not a valid IP or FQDN
 
 См. раздел [ClusterClass Integration](#clusterclass-integration) для подробностей.
 
-## Architecture
+## Architecture (v0.3.0+)
 
 ### Components
 
 - **Runtime Extension Server** - HTTP server (port 9443) handling CAPI hooks
-- **GeneratePatches Hook** - Allocates VIP synchronously during topology reconciliation
-- **Reconciler** - Fallback mode and claim adoption (ownerReferences)
+- **BeforeClusterCreate Hook** - Allocates VIP synchronously BEFORE Cluster creation (ONLY source)
 - **IPAM Integration** - Creates/manages IPAddressClaim resources
+- **ownerReferences** - Automatic cleanup when Cluster is deleted
+
+### Removed in v0.3.0
+
+- **GeneratePatches Hook** - Removed to prevent race condition (ran after topology controller)
+- **Reconciler Controller** - Disabled by default (created async race condition)
 
 ### Resource Flow
 

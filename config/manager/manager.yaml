@@ -27,6 +27,7 @@ spec:
             - "--leader-elect"
             - "--enable-runtime-extension=true"
             - "--runtime-extension-port=9443"
+            - "--enable-reconciler=false"
           imagePullPolicy: IfNotPresent
           livenessProbe:
             httpGet:

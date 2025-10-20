@@ -38,6 +38,8 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Register handlers for each hook with full paths including handler names
 	// CAPI Runtime SDK appends handler name to the hook path
+	// v0.3.0: BeforeClusterCreate sets VIP BEFORE Cluster is created
+	//         GeneratePatches patches InfrastructureCluster AFTER Cluster exists
 	handlerName := s.extension.Name()
 	mux.HandleFunc(fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/generatepatches/%s-generate-patches", handlerName), s.handleGeneratePatches)
 	mux.HandleFunc(fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclustercreate/%s-before-create", handlerName), s.handleBeforeClusterCreate)
@@ -48,7 +50,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// Add root handler for health checks
 	mux.HandleFunc("/", s.handleRoot)
 
-	s.logger.Info("registered runtime extension handlers",
+	s.logger.Info("registered runtime extension handlers (v0.3.0)",
 		"generatePatches", fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/generatepatches/%s-generate-patches", handlerName),
 		"beforeCreate", fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclustercreate/%s-before-create", handlerName),
 		"beforeDelete", fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclusterdelete/%s-before-delete", handlerName),
@@ -199,6 +201,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 
 	response := &runtimehooksv1.DiscoveryResponse{}
 	response.SetStatus(runtimehooksv1.ResponseStatusSuccess)
+	// v0.3.0: BeforeClusterCreate allocates VIP, GeneratePatches patches InfrastructureCluster
 	response.Handlers = []runtimehooksv1.ExtensionHandler{
 		{
 			Name: s.extension.Name() + "-generate-patches",
@@ -206,7 +209,7 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 				APIVersion: runtimehooksv1.GroupVersion.String(),
 				Hook:       "GeneratePatches",
 			},
-			TimeoutSeconds: ptrInt32(30),
+			TimeoutSeconds: ptrInt32(10), // Fast - just patching, no allocation
 			FailurePolicy:  &failPolicyFail,
 		},
 		{

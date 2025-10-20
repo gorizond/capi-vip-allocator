@@ -65,19 +65,21 @@ func (e *VIPExtension) Name() string {
 }
 
 // GeneratePatches is called during Cluster topology reconciliation to generate patches.
-// This is where we allocate the VIP and inject it as a variable.
+// v0.3.0: This hook ONLY patches InfrastructureCluster objects with VIP already allocated by BeforeClusterCreate.
+// It does NOT allocate VIPs - that's done synchronously in BeforeClusterCreate hook.
 func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehooksv1.GeneratePatchesRequest, response *runtimehooksv1.GeneratePatchesResponse) {
 	log := e.Logger.WithName("GeneratePatches")
 
 	log.Info("GeneratePatches hook called", "itemsCount", len(request.Items))
 
-	// Map to store allocated IPs: clusterName -> IP
+	// Map to store VIPs from Cluster objects: clusterName -> IP
+	// VIP should already be allocated by BeforeClusterCreate hook
 	allocatedIPs := make(map[string]string)
 
 	// Map to store cluster namespace: clusterName -> namespace
 	clusterNamespaces := make(map[string]string)
 
-	// First pass: Process Cluster objects and allocate VIPs
+	// First pass: Extract VIPs from Cluster objects (already allocated by BeforeClusterCreate)
 	for i, item := range request.Items {
 		// Check object type
 		var typeMeta metav1.TypeMeta
@@ -104,74 +106,17 @@ func (e *VIPExtension) GeneratePatches(ctx context.Context, request *runtimehook
 
 		log.Info("processing cluster", "name", cluster.Name, "namespace", cluster.Namespace, "uid", item.UID)
 
-		// Skip if no topology
-		if cluster.Spec.Topology == nil || cluster.Spec.Topology.Class == "" {
-			log.Info("no topology, skipping", "cluster", cluster.Name)
-			continue
-		}
-
 		// Store cluster namespace for later lookup
 		clusterNamespaces[cluster.Name] = cluster.Namespace
 
-		// Skip if endpoint already set
+		// Extract VIP from Cluster.Spec.ControlPlaneEndpoint.Host
+		// VIP should already be set by BeforeClusterCreate hook
 		if cluster.Spec.ControlPlaneEndpoint.Host != "" {
-			log.Info("controlPlaneEndpoint already set, skipping allocation", "cluster", cluster.Name, "host", cluster.Spec.ControlPlaneEndpoint.Host)
+			log.Info("found VIP in cluster (set by BeforeClusterCreate)", "cluster", cluster.Name, "host", cluster.Spec.ControlPlaneEndpoint.Host)
 			allocatedIPs[cluster.Name] = cluster.Spec.ControlPlaneEndpoint.Host
-			continue
+		} else {
+			log.Info("no VIP in cluster - BeforeClusterCreate hook might have been skipped", "cluster", cluster.Name)
 		}
-
-		// Check if clusterVip variable is already set in request variables
-		existingVIP := e.getVariableValueFromList(request.Variables, "clusterVip")
-		if existingVIP != "" {
-			log.Info("clusterVip variable already set", "cluster", cluster.Name, "ip", existingVIP)
-			// Just set it in spec
-			e.addClusterPatch(response, item.UID, "/spec/controlPlaneEndpoint", map[string]interface{}{
-				"host": existingVIP,
-				"port": defaultPort,
-			})
-			allocatedIPs[cluster.Name] = existingVIP
-			continue
-		}
-
-		// Allocate IP for this cluster
-		poolName, err := e.findPool(ctx, cluster.Spec.Topology.Class, controlPlaneRole)
-		if err != nil {
-			log.Error(err, "failed to find IP pool", "cluster", cluster.Name)
-			response.SetStatus(runtimehooksv1.ResponseStatusFailure)
-			response.SetMessage(fmt.Sprintf("failed to find IP pool for cluster %s: %v", cluster.Name, err))
-			return
-		}
-
-		if poolName == "" {
-			msg := fmt.Sprintf("no IP pool found for cluster class %q with role %q", cluster.Spec.Topology.Class, controlPlaneRole)
-			log.Info(msg, "cluster", cluster.Name)
-			// Don't fail - just skip this cluster
-			continue
-		}
-
-		// Pre-allocate IPAddressClaim
-		claimName := fmt.Sprintf("vip-cp-%s", cluster.Name)
-		ip, err := e.preallocateIP(ctx, cluster, claimName, poolName)
-		if err != nil {
-			log.Error(err, "failed to preallocate IP", "cluster", cluster.Name)
-			response.SetStatus(runtimehooksv1.ResponseStatusFailure)
-			response.SetMessage(fmt.Sprintf("failed to allocate IP for cluster %s: %v", cluster.Name, err))
-			return
-		}
-
-		log.Info("VIP allocated", "cluster", cluster.Name, "ip", ip, "pool", poolName)
-
-		// Store allocated IP
-		allocatedIPs[cluster.Name] = ip
-
-		// Add patch to set controlPlaneEndpoint
-		e.addClusterPatch(response, item.UID, "/spec/controlPlaneEndpoint", map[string]interface{}{
-			"host": ip,
-			"port": defaultPort,
-		})
-
-		// Add clusterVip variable to topology
-		e.addClusterVariablePatch(response, item.UID, cluster, "clusterVip", ip)
 	}
 
 	// Second pass: Patch InfrastructureCluster objects with allocated VIPs
@@ -281,9 +226,11 @@ func (e *VIPExtension) BeforeClusterCreate(ctx context.Context, request *runtime
 	}
 
 	if poolName == "" {
-		// No pool found - skip VIP allocation (not an error, might be intentional)
-		log.Info("no IP pool found for cluster class, skipping VIP allocation", "clusterClass", request.Cluster.Spec.Topology.Class)
-		response.SetStatus(runtimehooksv1.ResponseStatusSuccess)
+		// No pool found - this is an error in v0.3.0+
+		// User must explicitly configure IP pool with proper labels
+		log.Error(fmt.Errorf("no IP pool found"), "IP pool not found for cluster class", "clusterClass", request.Cluster.Spec.Topology.Class, "role", controlPlaneRole)
+		response.SetStatus(runtimehooksv1.ResponseStatusFailure)
+		response.SetMessage(fmt.Sprintf("no IP pool found for cluster class %q with labels vip.capi.gorizond.io/cluster-class=%s and vip.capi.gorizond.io/role=%s", request.Cluster.Spec.Topology.Class, request.Cluster.Spec.Topology.Class, controlPlaneRole))
 		return
 	}
 

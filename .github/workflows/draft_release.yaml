@@ -50,7 +50,7 @@ jobs:
       #   run: |
       #     make release-notes
       - name: Create Release Artifacts
-        run: make TAG=${{ github.ref_name }} release
+        run: make TAG=${{ github.ref_name }} release-manifests-only
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:

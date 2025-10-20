@@ -107,6 +107,13 @@ release: clean-release | $(RELEASE_DIR) ## Build release archives and installati
 	cp clusterctl-settings.json $(RELEASE_DIR)/
 	cd $(RELEASE_DIR) && shasum -a 256 * > checksums.txt
 
+.PHONY: release-manifests-only
+release-manifests-only: clean-release | $(RELEASE_DIR) ## Build only installation manifests without binaries.
+	$(MAKE) release-manifests
+	cp metadata.yaml $(RELEASE_DIR)/
+	cp clusterctl-settings.json $(RELEASE_DIR)/
+	cd $(RELEASE_DIR) && shasum -a 256 * > checksums.txt
+
 .PHONY: clean-release
 clean-release: ## Remove release artifacts.
 	rm -rf $(RELEASE_DIR)

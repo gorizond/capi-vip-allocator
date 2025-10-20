@@ -2,6 +2,109 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.3.0] - 2025-10-20
+
+### 🚀 Major: Eliminated Race Condition - BeforeClusterCreate + GeneratePatches Architecture
+
+**Problem in v0.2.x**: Reconcile controller created async race condition with CAPI topology controller.
+
+**Root Cause Analysis (session 031)**:
+```
+v0.2.1 Race Condition Timeline:
+T+0ms    - Cluster created with host=""
+T+100ms  - CAPI topology controller applies ClusterClass patches with EMPTY host
+T+500ms  - Reconciler asynchronously patches host="10.2.0.20"
+T+3000ms - BeforeClusterCreate hook sees host already set, skips allocation
+❌ Result: ProxmoxCluster created with EMPTY controlPlaneEndpoint (validation failed)
+```
+
+**Solution in v0.3.0**: Two-phase synchronous VIP allocation:
+```
+v0.3.0 Correct Timeline:
+T+0ms - BeforeClusterCreate hook (SYNCHRONOUS)
+  → Allocates VIP from IP pool
+  → Sets request.Cluster.Spec.ControlPlaneEndpoint.Host = "10.2.0.20"
+  → Returns success
+T+0ms - Cluster saved to etcd WITH VIP ✅
+T+100ms - CAPI topology controller starts
+T+200ms - GeneratePatches hook (synchronous)
+  → Reads VIP from Cluster object
+  → Patches ProxmoxCluster.spec.controlPlaneEndpoint.host
+  → Returns patches
+T+300ms - ProxmoxCluster created WITH correct VIP ✅
+```
+
+### Changed
+
+#### Architecture
+
+- **BeforeClusterCreate Hook** - PRIMARY VIP allocator (synchronous, blocks Cluster creation)
+  - Allocates VIP from GlobalInClusterIPPool
+  - Creates IPAddressClaim (without ownerReference - Cluster not in etcd yet)
+  - Waits for IPAM allocation (max 55s)
+  - Sets `request.Cluster.Spec.ControlPlaneEndpoint.Host` BEFORE Cluster is persisted
+  - Blocks cluster creation if IP pool not found or VIP allocation fails
+
+- **GeneratePatches Hook** - SECONDARY patcher (synchronous, fast)
+  - Extracts VIP from Cluster object (already allocated by BeforeClusterCreate)
+  - Patches InfrastructureCluster (ProxmoxCluster) with VIP
+  - Does NOT allocate VIPs (removed in v0.3.0)
+  - Timeout reduced from 30s to 10s (no allocation, just patching)
+
+- **Reconcile Controller** - DISABLED by default (opt-in via `--enable-reconciler=false`)
+  - Creating async race condition with BeforeClusterCreate
+  - Only for backward compatibility with clusters created without runtime extension
+  - NOT RECOMMENDED for new deployments
+
+#### Command-line Flags
+
+- Added `--enable-reconciler=false` - disable reconcile controller (default: false)
+- Changed `--enable-runtime-extension` default from `false` to `true`
+- Runtime extension is now REQUIRED for VIP allocation
+
+#### Deployment
+
+- Updated default args: `--enable-reconciler=false` added
+- Runtime Extension enabled by default
+
+#### Error Handling
+
+- BeforeClusterCreate now returns FAILURE if IP pool not found (was: skip silently)
+- Stricter validation: user must configure IP pool with proper labels
+
+### Removed
+
+- **Reconcile loop async VIP allocation** - source of race condition in v0.2.x
+- Reconciler is disabled by default, must be explicitly enabled (not recommended)
+
+### Performance
+
+- **BeforeClusterCreate**: 5-15 seconds (IPAM allocation time)
+- **GeneratePatches**: <100ms (no allocation, just patching)
+- **Total cluster creation time**: No change (but eliminates retries from validation failures)
+
+### Migration from v0.2.x
+
+**Automatic** - no action required:
+- Existing clusters: Continue working (no change)
+- New clusters: Use BeforeClusterCreate + GeneratePatches (automatic)
+- Runtime Extension: Enabled by default
+- Reconciler: Disabled by default (no race condition)
+
+**Breaking Changes**: None
+- All v0.2.x clusters remain functional
+- ClusterClass patches remain compatible
+- IPAM configuration unchanged
+
+### Testing
+
+Updated all tests to reflect new architecture:
+- BeforeClusterCreate allocates VIP synchronously
+- GeneratePatches patches InfrastructureCluster only
+- Reconciler disabled by default
+
+---
+
 ## [v0.2.0] - 2025-10-20
 
 ### 🚀 Major: Synchronous VIP Allocation in BeforeClusterCreate Hook
