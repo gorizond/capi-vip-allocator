@@ -2,6 +2,73 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.6.0] - 2025-10-20
+
+### 🚀 New Feature: Ingress VIP Support
+
+**Automatic allocation of dedicated VIP for Ingress/LoadBalancer nodes!**
+
+Users can now request an additional VIP for ingress traffic by adding an annotation to the Cluster:
+
+```yaml
+metadata:
+  annotations:
+    vip.capi.gorizond.io/ingress-enabled: "true"
+```
+
+### Added
+
+- **Ingress VIP Allocation** - Automatic allocation of separate VIP for ingress/loadbalancer nodes
+  - Triggered by annotation `vip.capi.gorizond.io/ingress-enabled: "true"`
+  - Creates separate IPAddressClaim with `role: ingress` label
+  - Writes VIP to `Cluster.spec.topology.variables[ingressVip]`
+  - Uses separate GlobalInClusterIPPool (with `role: ingress` label)
+
+- **Custom Variable `ingressVip`** - Available in ClusterClass patches
+  - Similar to `clusterVip` but for ingress nodes
+  - Can be used in kube-vip configuration for loadbalancer workers
+  - Automatically added when annotation is present
+
+### Integration Example
+
+```yaml
+# 1. Create Ingress IP Pool
+apiVersion: ipam.cluster.x-k8s.io/v1alpha2
+kind: GlobalInClusterIPPool
+metadata:
+  name: ingress-vip-pool
+  labels:
+    vip.capi.gorizond.io/cluster-class: my-cluster-class
+    vip.capi.gorizond.io/role: ingress  # ← ingress role
+spec:
+  addresses:
+    - "10.0.0.100-10.0.0.110"
+
+# 2. Create Cluster with ingress annotation
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: my-cluster
+  annotations:
+    vip.capi.gorizond.io/ingress-enabled: "true"  # ← Enable ingress VIP
+spec:
+  topology:
+    class: my-cluster-class
+
+# 3. Result (automatic after 5-10 seconds):
+# spec:
+#   topology:
+#     variables:
+#       - name: clusterVip
+#         value: "10.0.0.15"  # Control plane VIP
+#       - name: ingressVip
+#         value: "10.0.0.101"  # Ingress VIP ✨
+```
+
+See [Ingress VIP Integration](#ingress-vip-integration) in README for full configuration.
+
+---
+
 ## [v0.5.0] - 2025-10-20
 
 ### 🚀 Major: Back to Reconcile Controller Architecture

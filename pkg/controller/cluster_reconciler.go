@@ -20,16 +20,18 @@ import (
 )
 
 const (
-	controlPlaneRole     = "control-plane"
-	clusterClassLabel    = "vip.capi.gorizond.io/cluster-class"
-	roleLabel            = "vip.capi.gorizond.io/role"
-	ipamGroup            = "ipam.cluster.x-k8s.io"
-	ipamVersion          = "v1beta1"  // for IPAddressClaim and IPAddress
-	globalPoolAPIVersion = "v1alpha2" // for GlobalInClusterIPPool
-	globalPoolKind       = "GlobalInClusterIPPool"
-	ipAddressClaimKind   = "IPAddressClaim"
-	ipAddressKind        = "IPAddress"
-	defaultRequeueDelay  = 10 * time.Second
+	controlPlaneRole         = "control-plane"
+	ingressRole              = "ingress"
+	clusterClassLabel        = "vip.capi.gorizond.io/cluster-class"
+	roleLabel                = "vip.capi.gorizond.io/role"
+	ingressEnabledAnnotation = "vip.capi.gorizond.io/ingress-enabled"
+	ipamGroup                = "ipam.cluster.x-k8s.io"
+	ipamVersion              = "v1beta1"  // for IPAddressClaim and IPAddress
+	globalPoolAPIVersion     = "v1alpha2" // for GlobalInClusterIPPool
+	globalPoolKind           = "GlobalInClusterIPPool"
+	ipAddressClaimKind       = "IPAddressClaim"
+	ipAddressKind            = "IPAddress"
+	defaultRequeueDelay      = 10 * time.Second
 )
 
 // ClusterReconciler reconciles Cluster resources to ensure a control-plane VIP is allocated.
@@ -72,9 +74,9 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// EARLY CHECK: Skip if VIP already set by BeforeClusterCreate hook
 	if cluster.Spec.ControlPlaneEndpoint.Host != "" {
-		log.V(1).Info("controlPlaneEndpoint already set (by BeforeClusterCreate hook or manual configuration), skipping reconcile", 
+		log.V(1).Info("controlPlaneEndpoint already set (by BeforeClusterCreate hook or manual configuration), skipping reconcile",
 			"host", cluster.Spec.ControlPlaneEndpoint.Host)
-		
+
 		// Still ensure claim is adopted (ownerReference set)
 		claimName := fmt.Sprintf("vip-cp-%s", cluster.Name)
 		_, err := r.ensureClaim(ctx, cluster, claimName)
@@ -82,7 +84,7 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			// Only log error, don't block reconcile
 			log.V(1).Info("could not adopt IPAddressClaim (may not exist)", "error", err.Error())
 		}
-		
+
 		return ctrl.Result{}, nil
 	}
 
@@ -115,6 +117,15 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	log.Info("control-plane VIP assigned by controller (fallback mode)", "ip", ip)
+
+	// Check if Ingress VIP is requested via annotation
+	if cluster.Annotations[ingressEnabledAnnotation] == "true" {
+		if err := r.ensureIngressVIP(ctx, cluster, log); err != nil {
+			log.Error(err, "ensure ingress VIP")
+			return ctrl.Result{}, err
+		}
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -311,4 +322,140 @@ func (r *ClusterReconciler) hasClusterVipVariable(clusterClass *clusterv1.Cluste
 		}
 	}
 	return false
+}
+
+// hasIngressVipVariable checks if the ClusterClass defines an ingressVip variable.
+func (r *ClusterReconciler) hasIngressVipVariable(clusterClass *clusterv1.ClusterClass) bool {
+	for _, variable := range clusterClass.Spec.Variables {
+		if variable.Name == "ingressVip" {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureIngressVIP allocates and sets Ingress VIP for the cluster.
+func (r *ClusterReconciler) ensureIngressVIP(ctx context.Context, cluster *clusterv1.Cluster, log logr.Logger) error {
+	// Check if ingressVip variable already set
+	for _, v := range cluster.Spec.Topology.Variables {
+		if v.Name == "ingressVip" && string(v.Value.Raw) != `""` && string(v.Value.Raw) != "" {
+			log.V(1).Info("ingressVip already set, skipping allocation", "value", string(v.Value.Raw))
+			return nil
+		}
+	}
+
+	claimName := fmt.Sprintf("vip-ingress-%s", cluster.Name)
+
+	// Ensure claim exists
+	claim, err := r.ensureClaimWithRole(ctx, cluster, claimName, ingressRole)
+	if err != nil {
+		return fmt.Errorf("ensure ingress IPAddressClaim: %w", err)
+	}
+
+	// Wait for IP allocation
+	ip, ready, err := r.resolveIPAddress(ctx, cluster.Namespace, claim)
+	if err != nil {
+		return fmt.Errorf("resolve ingress IPAddress: %w", err)
+	}
+	if !ready {
+		log.Info("ingress claim not ready, will requeue")
+		return nil
+	}
+
+	// Check if ClusterClass defines ingressVip variable
+	clusterClass, err := r.getClusterClass(ctx, cluster.Spec.Topology.Class, cluster.Namespace)
+	if err != nil {
+		return fmt.Errorf("get ClusterClass: %w", err)
+	}
+
+	if !r.hasIngressVipVariable(clusterClass) {
+		log.V(1).Info("ClusterClass doesn't define ingressVip variable, skipping")
+		return nil
+	}
+
+	// Update or add ingressVip variable
+	patchHelper := client.MergeFrom(cluster.DeepCopy())
+
+	found := false
+	for i := range cluster.Spec.Topology.Variables {
+		if cluster.Spec.Topology.Variables[i].Name == "ingressVip" {
+			cluster.Spec.Topology.Variables[i].Value.Raw = []byte(fmt.Sprintf("%q", ip))
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		cluster.Spec.Topology.Variables = append(cluster.Spec.Topology.Variables, clusterv1.ClusterVariable{
+			Name:  "ingressVip",
+			Value: apiextensionsv1.JSON{Raw: []byte(fmt.Sprintf("%q", ip))},
+		})
+	}
+
+	if err := r.Client.Patch(ctx, cluster, patchHelper); err != nil {
+		return fmt.Errorf("patch cluster ingressVip variable: %w", err)
+	}
+
+	log.Info("ingress VIP assigned", "ip", ip)
+	return nil
+}
+
+// ensureClaim creates or adopts an IPAddressClaim with the specified role.
+// Overloaded version that accepts role parameter.
+func (r *ClusterReconciler) ensureClaimWithRole(ctx context.Context, cluster *clusterv1.Cluster, claimName string, role string) (*unstructured.Unstructured, error) {
+	log := r.Logger.WithValues("cluster", cluster.Name, "claim", claimName, "role", role)
+	claimGVK := schema.GroupVersionKind{Group: ipamGroup, Version: ipamVersion, Kind: ipAddressClaimKind}
+
+	claim := &unstructured.Unstructured{}
+	claim.SetGroupVersionKind(claimGVK)
+
+	namespacedName := types.NamespacedName{Name: claimName, Namespace: cluster.Namespace}
+	if err := r.Client.Get(ctx, namespacedName, claim); err == nil {
+		// Claim exists - check if it needs ownerReference adoption
+		if len(claim.GetOwnerReferences()) == 0 {
+			log.Info("Adopting IPAddressClaim created by runtime extension")
+			ownerRef := metav1.NewControllerRef(cluster, clusterv1.GroupVersion.WithKind("Cluster"))
+			claim.SetOwnerReferences([]metav1.OwnerReference{*ownerRef})
+
+			if err := r.Client.Update(ctx, claim); err != nil {
+				return nil, fmt.Errorf("adopt IPAddressClaim: %w", err)
+			}
+			log.Info("IPAddressClaim adopted successfully")
+		}
+		return claim, nil
+	} else if !errors.IsNotFound(err) {
+		return nil, fmt.Errorf("get IPAddressClaim: %w", err)
+	}
+
+	poolName, err := r.findPool(ctx, cluster.Spec.Topology.Class, role)
+	if err != nil {
+		return nil, err
+	}
+
+	if poolName == "" {
+		return nil, fmt.Errorf("no matching ip pool for class %q role %q", cluster.Spec.Topology.Class, role)
+	}
+
+	claim.SetName(claimName)
+	claim.SetNamespace(cluster.Namespace)
+	claim.SetLabels(map[string]string{
+		roleLabel: role,
+	})
+
+	ownerRef := metav1.NewControllerRef(cluster, clusterv1.GroupVersion.WithKind("Cluster"))
+	claim.SetOwnerReferences([]metav1.OwnerReference{*ownerRef})
+
+	if err := unstructured.SetNestedField(claim.Object, map[string]interface{}{
+		"apiGroup": ipamGroup,
+		"kind":     globalPoolKind,
+		"name":     poolName,
+	}, "spec", "poolRef"); err != nil {
+		return nil, fmt.Errorf("set poolRef: %w", err)
+	}
+
+	if err := r.Client.Create(ctx, claim); err != nil {
+		return nil, fmt.Errorf("create IPAddressClaim: %w", err)
+	}
+
+	return claim, nil
 }
