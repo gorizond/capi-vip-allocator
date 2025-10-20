@@ -592,12 +592,116 @@ go run ./cmd/capi-vip-allocator \
   --default-port=6443
 ```
 
+## Ingress VIP Integration
+
+> **New in v0.6.0**: Automatic allocation of dedicated VIP for ingress/loadbalancer nodes!
+
+### Enable Ingress VIP
+
+Add annotation to Cluster:
+
+```yaml
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: my-cluster
+  annotations:
+    vip.capi.gorizond.io/ingress-enabled: "true"  # ← Enable ingress VIP
+spec:
+  topology:
+    class: my-cluster-class
+    workers:
+      machineDeployments:
+        - class: loadbalancer-workers  # ← Worker pool for ingress
+          name: ingress
+          replicas: 2
+```
+
+### Create Ingress IP Pool
+
+```yaml
+apiVersion: ipam.cluster.x-k8s.io/v1alpha2
+kind: GlobalInClusterIPPool
+metadata:
+  name: ingress-vip-pool
+  labels:
+    vip.capi.gorizond.io/cluster-class: my-cluster-class
+    vip.capi.gorizond.io/role: ingress  # ← Ingress role (not control-plane!)
+spec:
+  addresses:
+    - "10.0.0.100-10.0.0.110"  # Separate range for ingress VIPs
+  gateway: "10.0.0.1"
+  prefix: 24
+```
+
+### ClusterClass Configuration
+
+```yaml
+spec:
+  variables:
+    # Define ingressVip variable (same as clusterVip)
+    - name: ingressVip
+      required: false
+      schema:
+        openAPIV3Schema:
+          default: ""
+          description: "Ingress VIP (auto-allocated when annotation enabled)"
+          type: string
+```
+
+### kube-vip for Loadbalancer Nodes
+
+Deploy kube-vip on loadbalancer workers via Fleet GitRepo:
+
+```yaml
+# In proxmox-addons (or similar GitRepo)
+defaultNamespace: kube-system
+helm:
+  version: 0.8.2
+  chart: kube-vip
+  repo: https://kube-vip.github.io/helm-charts
+  values:
+    nameOverride: kube-vip-ingress
+    config:
+      # Read ingressVip from Cluster via ClusterValues
+      address: ${ .ClusterValues.Cluster.spec.topology.variables.ingressVip }
+    env:
+      vip_interface: ""
+      vip_arp: "true"
+      lb_enable: "true"   # Enable LoadBalancer
+      cp_enable: "false"  # Disable control plane
+      svc_enable: "true"  # Enable Services
+    nodeSelector:
+      workload-type: loadbalancer  # Only loadbalancer nodes
+```
+
+### Result
+
+After cluster creation with annotation:
+
+```yaml
+# Two VIPs allocated automatically:
+spec:
+  controlPlaneEndpoint:
+    host: "10.0.0.15"  # Control plane VIP
+  topology:
+    variables:
+      - name: clusterVip
+        value: "10.0.0.15"  # Control plane
+      - name: ingressVip
+        value: "10.0.0.101"  # Ingress ✨
+```
+
+**Two kube-vip DaemonSets running:**
+1. `kube-vip-apiserver` on control plane nodes (10.0.0.15)
+2. `kube-vip-ingress` on loadbalancer workers (10.0.0.101)
+
 ## Roadmap
 
 - [x] Control-plane VIP allocation via reconcile controller
 - [x] Custom variable integration with ClusterClass
 - [x] kube-vip integration example
-- [ ] Ingress VIP support (annotation-based)
+- [x] Ingress VIP support (annotation-based) ✨
 - [ ] Prometheus metrics
 - [ ] Events and Conditions
 - [ ] Multi-namespace IP pools
