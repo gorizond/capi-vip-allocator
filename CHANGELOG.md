@@ -2,6 +2,79 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.7.0] - 2025-10-20
+
+### 🚀 New Feature: Prometheus Metrics
+
+**Comprehensive observability for VIP allocation and IP pool management!**
+
+### Added
+
+- **Prometheus Metrics** - Full observability of VIP allocator operations
+  - **Allocation metrics**: Track successful allocations, errors, and duration
+    - `capi_vip_allocator_allocations_total` (counter) - successful VIP allocations by role/cluster_class
+    - `capi_vip_allocator_allocation_errors_total` (counter) - allocation errors by reason
+    - `capi_vip_allocator_allocation_duration_seconds` (histogram) - allocation latency
+  
+  - **Pool metrics**: Monitor IP pool capacity and utilization
+    - `capi_vip_allocator_pools_available` (gauge) - available pools
+    - `capi_vip_allocator_pool_addresses_total` (gauge) - total IPs in pool
+    - `capi_vip_allocator_pool_addresses_free` (gauge) - free IPs
+    - `capi_vip_allocator_pool_addresses_used` (gauge) - used IPs
+  
+  - **Claim metrics**: Track IPAddressClaim lifecycle
+    - `capi_vip_allocator_claims_total` (gauge) - active claims
+    - `capi_vip_allocator_claims_ready` (gauge) - claims with allocated IP
+    - `capi_vip_allocator_claims_pending` (gauge) - claims waiting for IP
+  
+  - **Reconcile metrics**: Monitor controller operations
+    - `capi_vip_allocator_reconcile_total` (counter) - reconcile operations by result
+    - `capi_vip_allocator_reconcile_duration_seconds` (histogram) - reconcile latency
+
+- **Metrics endpoint**: `:8080/metrics` (default, configurable via `--metrics-bind-address`)
+
+- **Documentation**:
+  - Full metrics reference in README
+  - Example PromQL queries for common use cases
+  - ServiceMonitor example for Prometheus Operator
+  - Grafana dashboard recommendations
+
+### Integration Example
+
+```yaml
+# ServiceMonitor for Prometheus Operator
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: capi-vip-allocator
+  namespace: capi-system
+spec:
+  selector:
+    matchLabels:
+      control-plane: capi-vip-allocator-controller-manager
+  endpoints:
+    - port: metrics
+      interval: 30s
+```
+
+### Useful Queries
+
+```promql
+# Allocation success rate
+rate(capi_vip_allocator_allocations_total[5m])
+
+# Pool utilization %
+(capi_vip_allocator_pool_addresses_used / capi_vip_allocator_pool_addresses_total) * 100
+
+# P95 allocation latency
+histogram_quantile(0.95, rate(capi_vip_allocator_allocation_duration_seconds_bucket[5m]))
+
+# Pending claims (alert when > 5)
+sum(capi_vip_allocator_claims_pending)
+```
+
+---
+
 ## [v0.6.5] - 2025-10-20
 
 ### Added

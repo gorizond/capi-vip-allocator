@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/gorizond/capi-vip-allocator/pkg/controller"
+	_ "github.com/gorizond/capi-vip-allocator/pkg/metrics" // Import for metrics registration
 	runtimeext "github.com/gorizond/capi-vip-allocator/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"

@@ -1,0 +1,29 @@
+---
+# ServiceMonitor for Prometheus Operator
+# This resource enables automatic scraping of CAPI VIP Allocator metrics
+#
+# Prerequisites:
+# - Prometheus Operator installed in the cluster
+# - ServiceMonitor CRD available
+#
+# Installation:
+#   kubectl apply -f servicemonitor.yaml
+#
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: capi-vip-allocator
+  namespace: capi-system
+  labels:
+    app: capi-vip-allocator
+    control-plane: capi-vip-allocator-controller-manager
+spec:
+  selector:
+    matchLabels:
+      control-plane: capi-vip-allocator-controller-manager
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: http
+

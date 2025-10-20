@@ -1,0 +1,121 @@
+---
+# PrometheusRule for CAPI VIP Allocator Alerts
+# This resource defines alerting rules for common issues
+#
+# Prerequisites:
+# - Prometheus Operator installed
+# - PrometheusRule CRD available
+# - ServiceMonitor configured (servicemonitor.yaml)
+#
+# Installation:
+#   kubectl apply -f prometheusrules.yaml
+#
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: capi-vip-allocator
+  namespace: capi-system
+  labels:
+    app: capi-vip-allocator
+    prometheus: kube-prometheus
+spec:
+  groups:
+    - name: capi-vip-allocator.rules
+      interval: 30s
+      rules:
+        # Alert when VIP allocation error rate is high
+        - alert: CAPIVIPAllocatorHighErrorRate
+          expr: |
+            (
+              sum(rate(capi_vip_allocator_allocation_errors_total[5m])) by (cluster_class)
+              /
+              sum(rate(capi_vip_allocator_reconcile_total[5m])) by (cluster_class)
+            ) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High VIP allocation error rate"
+            description: "VIP allocation error rate is {{ $value | humanizePercentage }} for cluster class {{ $labels.cluster_class }}"
+
+        # Alert when IP pool is running low on free addresses
+        - alert: CAPIVIPPoolLowFreeAddresses
+          expr: |
+            (
+              capi_vip_allocator_pool_addresses_free
+              /
+              capi_vip_allocator_pool_addresses_total
+            ) < 0.2
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "IP pool {{ $labels.pool_name }} running low on free addresses"
+            description: "Pool {{ $labels.pool_name }} has only {{ $value | humanizePercentage }} free addresses remaining"
+
+        # Alert when IP pool is exhausted
+        - alert: CAPIVIPPoolExhausted
+          expr: capi_vip_allocator_pool_addresses_free == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "IP pool {{ $labels.pool_name }} exhausted"
+            description: "Pool {{ $labels.pool_name }} has no free addresses. New cluster creation will fail!"
+
+        # Alert when claims are pending for too long
+        - alert: CAPIVIPClaimsPendingTooLong
+          expr: capi_vip_allocator_claims_pending > 5
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "IPAddressClaims pending for too long"
+            description: "{{ $value }} IPAddressClaims in namespace {{ $labels.namespace }} are pending for more than 2 minutes"
+
+        # Alert when allocation latency is high
+        - alert: CAPIVIPAllocationHighLatency
+          expr: |
+            histogram_quantile(0.95, 
+              sum(rate(capi_vip_allocator_allocation_duration_seconds_bucket[5m])) by (cluster_class, le)
+            ) > 30
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High VIP allocation latency"
+            description: "P95 allocation latency for cluster class {{ $labels.cluster_class }} is {{ $value | humanizeDuration }}"
+
+        # Alert when no pools are available
+        - alert: CAPIVIPNoPoolsAvailable
+          expr: capi_vip_allocator_pools_available == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No IP pools available"
+            description: "No GlobalInClusterIPPools available for cluster class {{ $labels.cluster_class }} role {{ $labels.role }}"
+
+        # Alert when controller is down
+        - alert: CAPIVIPAllocatorDown
+          expr: absent(up{job="capi-vip-allocator"}) == 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CAPI VIP Allocator is down"
+            description: "CAPI VIP Allocator controller has been down for more than 5 minutes"
+
+        # Alert when reconcile loop is slow
+        - alert: CAPIVIPReconcileSlowLoop
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(capi_vip_allocator_reconcile_duration_seconds_bucket[5m])) by (cluster_class, le)
+            ) > 60
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Slow reconcile loop"
+            description: "P99 reconcile duration for cluster class {{ $labels.cluster_class }} is {{ $value | humanizeDuration }}"
+

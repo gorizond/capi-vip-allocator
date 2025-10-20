@@ -746,13 +746,143 @@ spec:
 
 **Both VIPs allocated without any configuration!** 🎉
 
+## Prometheus Metrics
+
+CAPI VIP Allocator exposes Prometheus metrics on port `:8080/metrics` (default).
+
+### Available Metrics
+
+#### Allocation Metrics
+
+- **`capi_vip_allocator_allocations_total`** (counter)
+  - Total number of successful VIP allocations
+  - Labels: `role` (control-plane/ingress), `cluster_class`
+
+- **`capi_vip_allocator_allocation_errors_total`** (counter)
+  - Total number of VIP allocation errors
+  - Labels: `role`, `cluster_class`, `reason`
+  - Reasons: `claim_creation_failed`, `ip_resolution_failed`, `cluster_patch_failed`
+
+- **`capi_vip_allocator_allocation_duration_seconds`** (histogram)
+  - Duration of VIP allocation operations
+  - Labels: `role`, `cluster_class`
+  - Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10
+
+#### Pool Metrics
+
+- **`capi_vip_allocator_pools_available`** (gauge)
+  - Number of available GlobalInClusterIPPools
+  - Labels: `cluster_class`, `role`
+
+- **`capi_vip_allocator_pool_addresses_total`** (gauge)
+  - Total IP addresses in pool
+  - Labels: `pool_name`
+
+- **`capi_vip_allocator_pool_addresses_free`** (gauge)
+  - Free IP addresses in pool
+  - Labels: `pool_name`
+
+- **`capi_vip_allocator_pool_addresses_used`** (gauge)
+  - Used IP addresses in pool
+  - Labels: `pool_name`
+
+#### Claim Metrics
+
+- **`capi_vip_allocator_claims_total`** (gauge)
+  - Total number of active IPAddressClaims
+  - Labels: `role`, `namespace`
+
+- **`capi_vip_allocator_claims_ready`** (gauge)
+  - Number of IPAddressClaims with allocated IP
+  - Labels: `role`, `namespace`
+
+- **`capi_vip_allocator_claims_pending`** (gauge)
+  - Number of IPAddressClaims waiting for IP allocation
+  - Labels: `role`, `namespace`
+
+#### Reconcile Metrics
+
+- **`capi_vip_allocator_reconcile_total`** (counter)
+  - Total number of cluster reconcile operations
+  - Labels: `cluster_class`, `result`
+  - Results: `success`, `error`, `skipped`, `requeued`
+
+- **`capi_vip_allocator_reconcile_duration_seconds`** (histogram)
+  - Duration of cluster reconcile operations
+  - Labels: `cluster_class`
+  - Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10
+
+### Example Queries
+
+#### Allocation rate by role
+```promql
+rate(capi_vip_allocator_allocations_total[5m])
+```
+
+#### Error rate by reason
+```promql
+rate(capi_vip_allocator_allocation_errors_total[5m])
+```
+
+#### Average allocation duration
+```promql
+rate(capi_vip_allocator_allocation_duration_seconds_sum[5m]) 
+  / 
+rate(capi_vip_allocator_allocation_duration_seconds_count[5m])
+```
+
+#### Pool utilization percentage
+```promql
+(capi_vip_allocator_pool_addresses_used / capi_vip_allocator_pool_addresses_total) * 100
+```
+
+#### Pending claims (SLO: should be < 5)
+```promql
+sum(capi_vip_allocator_claims_pending)
+```
+
+### ServiceMonitor Example
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: capi-vip-allocator
+  namespace: capi-system
+spec:
+  selector:
+    matchLabels:
+      control-plane: capi-vip-allocator-controller-manager
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+```
+
+### Grafana Dashboard
+
+Key metrics to monitor:
+
+1. **Allocation Success Rate**
+   - `capi_vip_allocator_allocations_total` vs `capi_vip_allocator_allocation_errors_total`
+   
+2. **Allocation Latency (p50, p95, p99)**
+   - `histogram_quantile(0.95, rate(capi_vip_allocator_allocation_duration_seconds_bucket[5m]))`
+   
+3. **Pool Capacity**
+   - Free IPs per pool
+   - Alerts when pool utilization > 80%
+   
+4. **Pending Claims**
+   - Alert when claims are pending for > 60s
+
 ## Roadmap
 
 - [x] Control-plane VIP allocation via reconcile controller
 - [x] Custom variable integration with ClusterClass
 - [x] kube-vip integration example
 - [x] Ingress VIP support (annotation-based) ✨
-- [ ] Prometheus metrics
+- [x] Prometheus metrics ✅
 - [ ] Events and Conditions
 - [ ] Multi-namespace IP pools
 - [ ] Helm chart

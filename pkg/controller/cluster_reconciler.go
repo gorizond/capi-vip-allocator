@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/gorizond/capi-vip-allocator/pkg/metrics"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -59,6 +60,7 @@ func (r *ClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // This controller works as a FALLBACK for clusters created without BeforeClusterCreate hook
 // or when the hook fails/is disabled.
 func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	startTime := time.Now()
 	log := r.Logger.WithValues("cluster", req.NamespacedName)
 
 	cluster := &clusterv1.Cluster{}
@@ -74,11 +76,21 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
+	clusterClass := cluster.Spec.Topology.Class
+
+	// Track reconcile result
+	defer func() {
+		duration := time.Since(startTime).Seconds()
+		metrics.VipReconcileDurationSeconds.WithLabelValues(clusterClass).Observe(duration)
+	}()
+
 	// ALWAYS check and allocate Ingress VIP first (independent of Control Plane VIP)
 	// Check if Ingress VIP is explicitly disabled
 	if cluster.Annotations[ingressEnabledAnnotation] != "false" {
 		if err := r.ensureIngressVIP(ctx, cluster, log); err != nil {
 			log.Error(err, "ensure ingress VIP")
+			metrics.VipAllocationErrorsTotal.WithLabelValues(ingressRole, clusterClass, "ingress_vip_allocation_failed").Inc()
+			metrics.VipReconcileTotal.WithLabelValues(clusterClass, "error").Inc()
 			return ctrl.Result{}, err
 		}
 	} else {
@@ -98,17 +110,21 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			log.V(1).Info("could not adopt IPAddressClaim (may not exist)", "error", err.Error())
 		}
 
+		metrics.VipReconcileTotal.WithLabelValues(clusterClass, "skipped").Inc()
 		return ctrl.Result{}, nil
 	}
 
 	log.Info("controlPlaneEndpoint not set, controller will allocate VIP (fallback mode)")
 
+	allocationStart := time.Now()
 	claimName := fmt.Sprintf("vip-cp-%s", cluster.Name)
 
 	// Ensure claim exists and adopt it if needed (may have been created by runtime extension)
 	claim, err := r.ensureClaim(ctx, cluster, claimName)
 	if err != nil {
 		log.Error(err, "ensure IPAddressClaim")
+		metrics.VipAllocationErrorsTotal.WithLabelValues(controlPlaneRole, clusterClass, "claim_creation_failed").Inc()
+		metrics.VipReconcileTotal.WithLabelValues(clusterClass, "error").Inc()
 		return ctrl.Result{}, err
 	}
 
@@ -116,20 +132,30 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	ip, ready, err := r.resolveIPAddress(ctx, cluster.Namespace, claim)
 	if err != nil {
 		log.Error(err, "resolve IPAddress")
+		metrics.VipAllocationErrorsTotal.WithLabelValues(controlPlaneRole, clusterClass, "ip_resolution_failed").Inc()
+		metrics.VipReconcileTotal.WithLabelValues(clusterClass, "error").Inc()
 		return ctrl.Result{}, err
 	}
 	if !ready {
 		log.Info("claim not ready, will requeue")
+		metrics.VipReconcileTotal.WithLabelValues(clusterClass, "requeued").Inc()
 		return ctrl.Result{RequeueAfter: defaultRequeueDelay}, nil
 	}
 
 	// Patch cluster endpoint
 	if err := r.patchClusterEndpoint(ctx, cluster, ip, cluster.Namespace); err != nil {
 		log.Error(err, "patch cluster endpoint")
+		metrics.VipAllocationErrorsTotal.WithLabelValues(controlPlaneRole, clusterClass, "cluster_patch_failed").Inc()
+		metrics.VipReconcileTotal.WithLabelValues(clusterClass, "error").Inc()
 		return ctrl.Result{}, err
 	}
 
-	log.Info("control-plane VIP assigned by controller (fallback mode)", "ip", ip)
+	allocationDuration := time.Since(allocationStart).Seconds()
+	metrics.VipAllocationDurationSeconds.WithLabelValues(controlPlaneRole, clusterClass).Observe(allocationDuration)
+	metrics.VipAllocationsTotal.WithLabelValues(controlPlaneRole, clusterClass).Inc()
+	metrics.VipReconcileTotal.WithLabelValues(clusterClass, "success").Inc()
+
+	log.Info("control-plane VIP assigned by controller (fallback mode)", "ip", ip, "duration_seconds", allocationDuration)
 
 	return ctrl.Result{}, nil
 }
@@ -208,7 +234,7 @@ func (r *ClusterReconciler) findPool(ctx context.Context, className, role string
 	// Find a pool that matches both className and role (supporting comma-separated values)
 	for _, pool := range pools.Items {
 		labels := pool.GetLabels()
-		
+
 		// Check if cluster-class label matches (exact or comma-separated)
 		classLabel, classExists := labels[clusterClassLabel]
 		if !classExists {
@@ -243,12 +269,12 @@ func (r *ClusterReconciler) findPool(ctx context.Context, className, role string
 func labelContainsValue(labelValue, targetValue string) bool {
 	// Trim spaces from target value
 	targetValue = strings.TrimSpace(targetValue)
-	
+
 	// Check exact match first (optimization)
 	if strings.TrimSpace(labelValue) == targetValue {
 		return true
 	}
-	
+
 	// Split by comma and check each value
 	values := strings.Split(labelValue, ",")
 	for _, val := range values {
@@ -256,7 +282,7 @@ func labelContainsValue(labelValue, targetValue string) bool {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -376,23 +402,28 @@ func (r *ClusterReconciler) hasClusterVipVariable(clusterClass *clusterv1.Cluste
 
 // ensureIngressVIP allocates and sets Ingress VIP annotation for the cluster.
 func (r *ClusterReconciler) ensureIngressVIP(ctx context.Context, cluster *clusterv1.Cluster, log logr.Logger) error {
+	clusterClass := cluster.Spec.Topology.Class
+
 	// Check if ingress VIP annotation already set
 	if existingVip, ok := cluster.Annotations[ingressVipAnnotation]; ok && existingVip != "" {
 		log.V(1).Info("ingress VIP annotation already set, skipping allocation", "vip", existingVip)
 		return nil
 	}
 
+	allocationStart := time.Now()
 	claimName := fmt.Sprintf("vip-ingress-%s", cluster.Name)
 
 	// Ensure claim exists
 	claim, err := r.ensureClaimWithRole(ctx, cluster, claimName, ingressRole)
 	if err != nil {
+		metrics.VipAllocationErrorsTotal.WithLabelValues(ingressRole, clusterClass, "claim_creation_failed").Inc()
 		return fmt.Errorf("ensure ingress IPAddressClaim: %w", err)
 	}
 
 	// Wait for IP allocation
 	ip, ready, err := r.resolveIPAddress(ctx, cluster.Namespace, claim)
 	if err != nil {
+		metrics.VipAllocationErrorsTotal.WithLabelValues(ingressRole, clusterClass, "ip_resolution_failed").Inc()
 		return fmt.Errorf("resolve ingress IPAddress: %w", err)
 	}
 	if !ready {
@@ -414,10 +445,15 @@ func (r *ClusterReconciler) ensureIngressVIP(ctx context.Context, cluster *clust
 	cluster.Labels[ingressVipAnnotation] = ip
 
 	if err := r.Client.Patch(ctx, cluster, patchHelper); err != nil {
+		metrics.VipAllocationErrorsTotal.WithLabelValues(ingressRole, clusterClass, "cluster_patch_failed").Inc()
 		return fmt.Errorf("patch cluster ingress VIP annotation and label: %w", err)
 	}
 
-	log.Info("ingress VIP assigned to annotation and label", "ip", ip, "annotation", ingressVipAnnotation)
+	allocationDuration := time.Since(allocationStart).Seconds()
+	metrics.VipAllocationDurationSeconds.WithLabelValues(ingressRole, clusterClass).Observe(allocationDuration)
+	metrics.VipAllocationsTotal.WithLabelValues(ingressRole, clusterClass).Inc()
+
+	log.Info("ingress VIP assigned to annotation and label", "ip", ip, "annotation", ingressVipAnnotation, "duration_seconds", allocationDuration)
 	return nil
 }
 
