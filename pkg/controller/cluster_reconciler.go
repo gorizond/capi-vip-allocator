@@ -73,9 +73,20 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// EARLY CHECK: Skip if VIP already set by BeforeClusterCreate hook
+	// ALWAYS check and allocate Ingress VIP first (independent of Control Plane VIP)
+	// Check if Ingress VIP is explicitly disabled
+	if cluster.Annotations[ingressEnabledAnnotation] != "false" {
+		if err := r.ensureIngressVIP(ctx, cluster, log); err != nil {
+			log.Error(err, "ensure ingress VIP")
+			return ctrl.Result{}, err
+		}
+	} else {
+		log.V(1).Info("ingress VIP explicitly disabled via annotation")
+	}
+
+	// EARLY CHECK: Skip Control Plane VIP allocation if already set
 	if cluster.Spec.ControlPlaneEndpoint.Host != "" {
-		log.V(1).Info("controlPlaneEndpoint already set (by BeforeClusterCreate hook or manual configuration), skipping reconcile",
+		log.V(1).Info("controlPlaneEndpoint already set (by BeforeClusterCreate hook or manual configuration), skipping control plane VIP reconcile",
 			"host", cluster.Spec.ControlPlaneEndpoint.Host)
 
 		// Still ensure claim is adopted (ownerReference set)
@@ -118,17 +129,6 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	log.Info("control-plane VIP assigned by controller (fallback mode)", "ip", ip)
-
-	// Check if Ingress VIP is explicitly disabled
-	// By default, ingress VIP is allocated (if ClusterClass supports it)
-	if cluster.Annotations[ingressEnabledAnnotation] != "false" {
-		if err := r.ensureIngressVIP(ctx, cluster, log); err != nil {
-			log.Error(err, "ensure ingress VIP")
-			return ctrl.Result{}, err
-		}
-	} else {
-		log.V(1).Info("ingress VIP explicitly disabled via annotation")
-	}
 
 	return ctrl.Result{}, nil
 }
