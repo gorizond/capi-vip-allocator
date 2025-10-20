@@ -118,12 +118,15 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	log.Info("control-plane VIP assigned by controller (fallback mode)", "ip", ip)
 
-	// Check if Ingress VIP is requested via annotation
-	if cluster.Annotations[ingressEnabledAnnotation] == "true" {
+	// Check if Ingress VIP is explicitly disabled
+	// By default, ingress VIP is allocated (if ClusterClass supports it)
+	if cluster.Annotations[ingressEnabledAnnotation] != "false" {
 		if err := r.ensureIngressVIP(ctx, cluster, log); err != nil {
 			log.Error(err, "ensure ingress VIP")
 			return ctrl.Result{}, err
 		}
+	} else {
+		log.V(1).Info("ingress VIP explicitly disabled via annotation")
 	}
 
 	return ctrl.Result{}, nil

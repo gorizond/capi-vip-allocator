@@ -596,17 +596,16 @@ go run ./cmd/capi-vip-allocator \
 
 > **New in v0.6.0**: Automatic allocation of dedicated VIP for ingress/loadbalancer nodes!
 
-### Enable Ingress VIP
+### Default Behavior
 
-Add annotation to Cluster:
+Ingress VIP is allocated **BY DEFAULT** if ClusterClass defines `ingressVip` variable:
 
 ```yaml
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Cluster
 metadata:
   name: my-cluster
-  annotations:
-    vip.capi.gorizond.io/ingress-enabled: "true"  # ← Enable ingress VIP
+  # No annotation needed! Ingress VIP allocated automatically
 spec:
   topology:
     class: my-cluster-class
@@ -615,6 +614,18 @@ spec:
         - class: loadbalancer-workers  # ← Worker pool for ingress
           name: ingress
           replicas: 2
+```
+
+**Result:** Both Control Plane and Ingress VIPs allocated automatically! ✨
+
+### Disable Ingress VIP
+
+To disable ingress VIP allocation:
+
+```yaml
+metadata:
+  annotations:
+    vip.capi.gorizond.io/ingress-enabled: "false"  # ← Explicitly disable
 ```
 
 ### Create Ingress IP Pool
@@ -677,24 +688,26 @@ helm:
 
 ### Result
 
-After cluster creation with annotation:
+After cluster creation (both VIPs allocated by default):
 
 ```yaml
 # Two VIPs allocated automatically:
 spec:
   controlPlaneEndpoint:
-    host: "10.0.0.15"  # Control plane VIP
+    host: "10.0.0.15"  # Control plane VIP ✅
   topology:
     variables:
       - name: clusterVip
-        value: "10.0.0.15"  # Control plane
+        value: "10.0.0.15"  # Control plane ✅
       - name: ingressVip
-        value: "10.0.0.101"  # Ingress ✨
+        value: "10.0.0.101"  # Ingress (allocated by default!) ✨
 ```
 
 **Two kube-vip DaemonSets running:**
 1. `kube-vip-apiserver` on control plane nodes (10.0.0.15)
 2. `kube-vip-ingress` on loadbalancer workers (10.0.0.101)
+
+**Both VIPs allocated without any configuration!** 🎉
 
 ## Roadmap
 

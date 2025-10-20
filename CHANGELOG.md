@@ -8,18 +8,21 @@ All notable changes to this project will be documented in this file.
 
 **Automatic allocation of dedicated VIP for Ingress/LoadBalancer nodes!**
 
-Users can now request an additional VIP for ingress traffic by adding an annotation to the Cluster:
+Ingress VIP is allocated **BY DEFAULT** for all clusters (if ClusterClass defines `ingressVip` variable).
+
+To **disable** ingress VIP allocation, add annotation:
 
 ```yaml
 metadata:
   annotations:
-    vip.capi.gorizond.io/ingress-enabled: "true"
+    vip.capi.gorizond.io/ingress-enabled: "false"  # Disable ingress VIP
 ```
 
 ### Added
 
 - **Ingress VIP Allocation** - Automatic allocation of separate VIP for ingress/loadbalancer nodes
-  - Triggered by annotation `vip.capi.gorizond.io/ingress-enabled: "true"`
+  - **Enabled by default** if ClusterClass defines `ingressVip` variable
+  - Can be **disabled** via annotation `vip.capi.gorizond.io/ingress-enabled: "false"`
   - Creates separate IPAddressClaim with `role: ingress` label
   - Writes VIP to `Cluster.spec.topology.variables[ingressVip]`
   - Uses separate GlobalInClusterIPPool (with `role: ingress` label)
@@ -44,13 +47,13 @@ spec:
   addresses:
     - "10.0.0.100-10.0.0.110"
 
-# 2. Create Cluster with ingress annotation
+# 2. Create Cluster (ingress VIP enabled by default)
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Cluster
 metadata:
   name: my-cluster
-  annotations:
-    vip.capi.gorizond.io/ingress-enabled: "true"  # ← Enable ingress VIP
+  # No annotation needed! Ingress VIP allocated by default
+  # To disable: vip.capi.gorizond.io/ingress-enabled: "false"
 spec:
   topology:
     class: my-cluster-class
