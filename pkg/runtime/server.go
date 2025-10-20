@@ -36,15 +36,23 @@ func NewServer(client client.Client, logger logr.Logger, port int, certDir strin
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 
-	// Register handlers for each hook
-	mux.HandleFunc("/hooks.runtime.cluster.x-k8s.io/v1alpha1/generatepatches", s.handleGeneratePatches)
-	mux.HandleFunc("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclustercreate", s.handleBeforeClusterCreate)
-	mux.HandleFunc("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclusterdelete", s.handleBeforeClusterDelete)
-	mux.HandleFunc("/hooks.runtime.cluster.x-k8s.io/v1alpha1/afterclusterupgrade", s.handleAfterClusterUpgrade)
+	// Register handlers for each hook with full paths including handler names
+	// CAPI Runtime SDK appends handler name to the hook path
+	handlerName := s.extension.Name()
+	mux.HandleFunc(fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/generatepatches/%s-generate-patches", handlerName), s.handleGeneratePatches)
+	mux.HandleFunc(fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclustercreate/%s-before-create", handlerName), s.handleBeforeClusterCreate)
+	mux.HandleFunc(fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclusterdelete/%s-before-delete", handlerName), s.handleBeforeClusterDelete)
+	mux.HandleFunc(fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/afterclusterupgrade/%s-after-upgrade", handlerName), s.handleAfterClusterUpgrade)
 	mux.HandleFunc("/hooks.runtime.cluster.x-k8s.io/v1alpha1/discovery", s.handleDiscovery)
 
 	// Add root handler for health checks
 	mux.HandleFunc("/", s.handleRoot)
+
+	s.logger.Info("registered runtime extension handlers",
+		"generatePatches", fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/generatepatches/%s-generate-patches", handlerName),
+		"beforeCreate", fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclustercreate/%s-before-create", handlerName),
+		"beforeDelete", fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclusterdelete/%s-before-delete", handlerName),
+		"afterUpgrade", fmt.Sprintf("/hooks.runtime.cluster.x-k8s.io/v1alpha1/afterclusterupgrade/%s-after-upgrade", handlerName))
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.port),

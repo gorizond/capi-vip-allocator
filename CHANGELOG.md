@@ -2,6 +2,51 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.12] - 2025-10-20
+
+### Fixed
+
+- 🐛 **Critical bug**: Fixed HTTP handler paths to include handler names
+  - CAPI Runtime SDK appends handler name to hook paths (e.g., `/beforeclustercreate/vip-allocator-before-create`)
+  - Previously: handlers registered without handler name suffix → 404 errors
+  - Now: handlers registered with full paths including handler names
+  - **Impact**: All runtime extension hooks now work correctly (BeforeClusterCreate, GeneratePatches, etc.)
+
+### Added
+
+- Logging of registered handler paths on startup for debugging
+
+### Technical Details
+
+**Root Cause**: CAPI Runtime SDK constructs URLs by combining hook path with handler name from ExtensionConfig.
+Example: `BeforeClusterCreate` hook with handler name `vip-allocator-before-create` results in URL:
+```
+/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclustercreate/vip-allocator-before-create
+```
+
+**v0.1.11 (broken)**:
+```go
+mux.HandleFunc("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclustercreate", handler)
+// Result: 404 when CAPI calls /beforeclustercreate/vip-allocator-before-create
+```
+
+**v0.1.12 (fixed)**:
+```go
+mux.HandleFunc("/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclustercreate/vip-allocator-before-create", handler)
+// Result: 200 OK
+```
+
+**Testing**: After deploying v0.1.12, logs should show:
+```
+registered runtime extension handlers 
+  generatePatches=/hooks.runtime.cluster.x-k8s.io/v1alpha1/generatepatches/vip-allocator-generate-patches
+  beforeCreate=/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclustercreate/vip-allocator-before-create
+```
+
+And NO more 404 errors in runtime extension logs.
+
+---
+
 ## [v0.1.11] - 2025-10-20
 
 ### Fixed
