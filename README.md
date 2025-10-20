@@ -1,76 +1,93 @@
 # CAPI VIP Allocator
 
-Automatic Virtual IP allocation for Cluster API clusters using Runtime Extensions.
+Automatic Virtual IP allocation for Cluster API clusters using reconcile controller and custom ClusterClass variables.
+
+> **Important:** This operator **only allocates** IP addresses from IPAM pools. To **install** the VIP on control plane nodes, you also need [kube-vip](https://kube-vip.io/) or similar solution (see [kube-vip integration](#kube-vip-integration)).
 
 ## Features
 
-- **Zero race condition** - VIP allocated synchronously in BeforeClusterCreate hook (v0.3.0+)
-- **Single source of truth** - BeforeClusterCreate is the ONLY VIP allocation mechanism
-- **No reconcile loop** - Eliminates async race condition with topology controller
-- **Automatic allocation** - IP from IPAM pool based on ClusterClass labels
+- **Automatic allocation** - Free IP from IPAM pool based on ClusterClass labels
 - **Automatic cleanup** - IP released when Cluster is deleted via ownerReferences
-- **CAPI native** - Uses Runtime Extensions API
-- **Production ready** - TLS, health checks, strict validation
+- **Zero configuration** - User doesn't specify VIP in Cluster manifest
+- **No race conditions** - Reconcile controller runs before topology reconcile
+- **Custom variable** - VIP available in ClusterClass as `{{ .clusterVip }}`
+- **Production ready** - TLS, health checks, leader election
 
-## How it works (v0.3.0+)
+## How it works (v0.5.0)
 
-**Two-phase synchronous VIP allocation:**
+**Architecture: Reconcile Controller + Custom Variable + kube-vip**
 
 ```
-Phase 1: BeforeClusterCreate Hook (PRIMARY - VIP Allocation)
-Client creates Cluster (host: "")
-         ↓
-CAPI calls BeforeClusterCreate hook SYNCHRONOUSLY
-         ↓
-VIP Allocator Extension
-  1. Finds IP pool by cluster-class label
-  2. Creates IPAddressClaim (without ownerRef - Cluster not in etcd yet)
-  3. Waits for IPAM to allocate IP (retry every 1s, max 55s)
-  4. Sets request.Cluster.Spec.ControlPlaneEndpoint.Host = "10.2.0.20"
-         ↓
-Cluster saved to etcd WITH IP ✅
-
-Phase 2: GeneratePatches Hook (SECONDARY - Infrastructure Patching)
-CAPI Topology Controller starts rendering
-         ↓
-CAPI calls GeneratePatches hook SYNCHRONOUSLY
-         ↓
-VIP Allocator Extension
-  1. Reads VIP from Cluster.Spec.ControlPlaneEndpoint.Host
-  2. Patches ProxmoxCluster.spec.controlPlaneEndpoint.host = "10.2.0.20"
-         ↓
-ProxmoxCluster created WITH correct VIP ✅
-         ↓
-ClusterClass patches use {{ .builtin.controlPlane.endpoint.host }} for RKE2ControlPlane ✅
-         ↓
-Cleanup on delete: ownerReference ensures IPAddressClaim is deleted ✅
+┌───────────────────────────────────────────────────────────┐
+│ MANAGEMENT CLUSTER                                        │
+│                                                            │
+│ 1. User creates Cluster (no VIP specified)               │
+│    Cluster.spec.controlPlaneEndpoint.host = ""           │
+│    Cluster.spec.topology.variables[clusterVip] = ""      │
+│                                                            │
+│ 2. Reconcile Controller (capi-vip-allocator)             │
+│    ├─ Finds GlobalInClusterIPPool (by labels)            │
+│    ├─ Creates IPAddressClaim                              │
+│    ├─ Waits for IPAM to allocate free IP                 │
+│    └─ Patches Cluster:                                    │
+│       ├─ spec.controlPlaneEndpoint.host = "10.2.0.21"    │
+│       └─ spec.topology.variables[clusterVip] = "10.2.0.21"│
+│                                                            │
+│ 3. Topology Controller (CAPI)                             │
+│    ├─ Reads clusterVip variable                           │
+│    ├─ Applies ClusterClass inline patches                │
+│    └─ Creates InfrastructureCluster & ControlPlane       │
+│                                                            │
+└───────────────────────────────────────────────────────────┘
+                          ↓
+┌───────────────────────────────────────────────────────────┐
+│ WORKLOAD CLUSTER                                          │
+│                                                            │
+│ 4. kube-vip DaemonSet                                     │
+│    ├─ Deployed via ClusterClass patch (HelmChart)        │
+│    ├─ Reads address from HelmChart: {{ .clusterVip }}    │
+│    ├─ INSTALLS VIP on control plane node interface       │
+│    └─ Provides HA for multi control plane clusters       │
+│                                                            │
+└───────────────────────────────────────────────────────────┘
 ```
 
-**Key difference from v0.2.x:** 
-- ✅ BeforeClusterCreate allocates VIP BEFORE Cluster is saved to etcd
-- ✅ GeneratePatches patches InfrastructureCluster with VIP from Cluster
-- ❌ No reconcile loop! (was source of race condition in v0.2.x)
+**Result:** API server accessible via VIP, Rancher auto-import works! ✅
+
+**Two components work together:**
+- **capi-vip-allocator**: Allocates free IP from IPAM pool
+- **kube-vip**: Installs VIP on control plane node interface
 
 ## Quick Start
 
 ### Prerequisites
 
-1. **CAPI with RuntimeSDK enabled**
+1. **CAPI with ClusterTopology feature enabled** (enabled by default in CAPI v1.5+)
+
+2. **IPAM provider installed** (e.g., in-cluster IPAM)
 
 ```bash
-kubectl patch deployment capi-controller-manager -n capi-system --type=json -p '[
-  {"op": "replace", "path": "/spec/template/spec/containers/0/args/2", 
-   "value": "--feature-gates=RuntimeSDK=true,ClusterTopology=true,MachinePool=true"}
-]'
+# Install in-cluster IPAM provider
+clusterctl init --ipam in-cluster
+
+# Or via CAPIProvider (Rancher Turtles)
+kubectl apply -f - <<EOF
+apiVersion: turtles-capi.cattle.io/v1alpha1
+kind: CAPIProvider
+metadata:
+  name: ipam-in-cluster
+  namespace: capi-system
+spec:
+  type: ipam
+  version: v0.1.0
+EOF
 ```
 
-2. **cert-manager installed**
+3. **cert-manager installed** (for Runtime Extension TLS - optional if using reconciler only)
 
 ```bash
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.0/cert-manager.yaml
 ```
-
-3. **IPAM provider** (in-cluster or other)
 
 ### Installation
 
@@ -83,19 +100,19 @@ metadata:
   name: capi-vip-allocator
   namespace: capi-system
 spec:
-  type: addon  # Runtime Extension providers use 'addon' type
-  version: v0.3.0
+  type: addon
+  version: v0.5.0
   fetchConfig:
-    url: https://github.com/gorizond/capi-vip-allocator/releases/download/v0.3.0/capi-vip-allocator.yaml
+    url: https://github.com/gorizond/capi-vip-allocator/releases/download/v0.5.0/capi-vip-allocator.yaml
 ```
-
-**Note:** Runtime Extensions are registered via `ExtensionConfig` resource (included in the manifest), not through CAPIProvider type.
 
 Or directly:
 
 ```bash
-kubectl apply -f https://github.com/gorizond/capi-vip-allocator/releases/download/v0.3.0/capi-vip-allocator.yaml
+kubectl apply -f https://github.com/gorizond/capi-vip-allocator/releases/download/v0.5.0/capi-vip-allocator.yaml
 ```
+
+**Note:** v0.5.0 uses reconcile controller (not Runtime Extensions) by default.
 
 ### Create IP Pool
 
@@ -122,6 +139,7 @@ kind: Cluster
 metadata:
   name: my-cluster
 spec:
+  # DO NOT specify controlPlaneEndpoint! It will be set automatically
   topology:
     class: my-cluster-class
     version: v1.31.0
@@ -132,9 +150,15 @@ spec:
         - class: default-worker
           name: workers
           replicas: 2
+    # DO NOT specify clusterVip variable! It will be added automatically
+    variables:
+      - name: cni
+        value: calico
 ```
 
-**Done!** The `controlPlaneEndpoint.host` will be automatically allocated.
+**Done!** Within 5-10 seconds:
+- `Cluster.spec.controlPlaneEndpoint.host` will be set (e.g., `10.0.0.15`)
+- `Cluster.spec.topology.variables[clusterVip]` will be added (e.g., `10.0.0.15`)
 
 ## Verification
 
@@ -169,29 +193,55 @@ spec:
     port: 6443
 ```
 
-### Runtime Extension Options
+### Configuration Options
 
-Deployment args (v0.3.0+):
+Deployment args (v0.5.0+):
 
-- `--enable-runtime-extension=true` - Enable Runtime Extension mode (default: true, REQUIRED)
-- `--enable-reconciler=false` - Enable reconcile controller (default: false, NOT RECOMMENDED - causes race condition)
+- `--enable-reconciler=true` - Enable reconcile controller (default: true, REQUIRED for VIP allocation)
+- `--enable-runtime-extension=false` - Enable Runtime Extension mode (default: false, deprecated)
 - `--runtime-extension-port=9443` - Runtime Extension server port
-- `--runtime-extension-name=vip-allocator` - Name of the runtime extension handler (must not contain dots, default: vip-allocator)
 - `--leader-elect` - Enable leader election
 - `--default-port=6443` - Default control plane port
 
-**Important:** In v0.3.0+, the reconcile controller is disabled by default to prevent race conditions. All VIP allocation is done synchronously in BeforeClusterCreate hook.
+**Important:** v0.5.0 uses **reconcile controller** architecture. Runtime Extensions are deprecated and disabled by default.
 
 ## ClusterClass Integration
 
-### Important: Avoid Race Conditions
+### Step 1: Define `clusterVip` variable
 
-The operator uses **GeneratePatches hook** to populate VIP before infrastructure objects are created. This means you should **NOT** copy `Cluster.spec.controlPlaneEndpoint.host` in your ClusterClass patches.
-
-#### ❌ Incorrect Pattern (causes race condition)
+The reconcile controller writes VIP to a **custom variable** `clusterVip`. You MUST define it in your ClusterClass:
 
 ```yaml
-# DO NOT USE - this copies empty value before VIP is allocated
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: ClusterClass
+metadata:
+  name: my-cluster-class
+spec:
+  variables:
+    # REQUIRED: Define clusterVip variable for reconcile controller
+    - name: clusterVip
+      required: false
+      schema:
+        openAPIV3Schema:
+          default: ""
+          description: "Control plane VIP address (automatically set by capi-vip-allocator)"
+          type: string
+    
+    # Your other variables...
+    - name: cni
+      schema:
+        openAPIV3Schema:
+          type: string
+          default: calico
+```
+
+### Step 2: Use `{{ .clusterVip }}` in patches
+
+Use the custom variable in ClusterClass patches to propagate VIP to infrastructure resources:
+
+#### Patch InfrastructureCluster
+
+```yaml
 patches:
   - name: set-vip-on-infrastructure-cluster
     definitions:
@@ -199,120 +249,209 @@ patches:
           - op: replace
             path: /spec/template/spec/controlPlaneEndpoint/host
             valueFrom:
-              template: "{{ .builtin.cluster.spec.controlPlaneEndpoint.host }}"
+              template: "{{ .clusterVip }}"  # ✅ Uses custom variable
         selector:
           apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
-          kind: ProxmoxClusterTemplate  # or any InfrastructureClusterTemplate
+          kind: ProxmoxClusterTemplate  # or your provider
           matchResources:
             infrastructureCluster: true
 ```
 
-**Why this fails:**
-1. ClusterClass patches run **before** GeneratePatches hook
-2. At that moment `Cluster.spec.controlPlaneEndpoint.host` is still empty
-3. Infrastructure webhook rejects empty endpoint
-4. Cluster creation fails with validation error
-
-#### ✅ Correct Pattern
-
-Use `.builtin.controlPlane.endpoint.host` instead - this value is already populated by the operator:
+#### Patch ControlPlane (for TLS SANs and registration)
 
 ```yaml
-# CORRECT - uses controlPlane.endpoint which is populated by operator
-patches:
+  - name: set-control-plane-tls-san
+    definitions:
+      - jsonPatches:
+          - op: add
+            path: /spec/template/spec/serverConfig/tlsSAN/-
+            valueFrom:
+              template: "{{ .clusterVip }}"  # ✅ Uses custom variable
+        selector:
+          apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+          kind: RKE2ControlPlaneTemplate
+
   - name: set-control-plane-registration
     definitions:
       - jsonPatches:
           - op: replace
             path: /spec/template/spec/registrationAddress
             valueFrom:
-              template: "{{ .builtin.controlPlane.endpoint.host }}"
+              template: "{{ .clusterVip }}"  # ✅ Uses custom variable
         selector:
           apiVersion: controlplane.cluster.x-k8s.io/v1beta1
           kind: RKE2ControlPlaneTemplate
+```
 
-  - name: set-control-plane-tls-san
+### Step 3: kube-vip Integration
+
+> **Critical:** `capi-vip-allocator` **only allocates** IP addresses. You need **kube-vip** to actually **install** the VIP on control plane nodes!
+
+Add kube-vip HelmChart via ClusterClass patch:
+
+```yaml
+patches:
+  - name: install-kube-vip
     definitions:
       - jsonPatches:
           - op: add
-            path: /spec/template/spec/tlsSAN/-
+            path: /spec/template/spec/files/-
             valueFrom:
-              template: "{{ .builtin.controlPlane.endpoint.host }}"
+              template: |
+                path: /var/lib/rancher/rke2/server/manifests/kube-vip-apiserver.yaml
+                permissions: "0644"
+                owner: root:root
+                content: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: kube-vip-apiserver
+                    namespace: kube-system
+                  spec:
+                    version: 0.8.2
+                    chart: kube-vip
+                    repo: https://kube-vip.github.io/helm-charts
+                    bootstrap: true
+                    valuesContent: |-
+                      nameOverride: kube-vip-apiserver
+                      config:
+                        address: '{{ .clusterVip }}'  # ✅ Uses allocated VIP
+                      env:
+                        vip_interface: ""  # Auto-detect
+                        vip_arp: "true"
+                        lb_enable: "false"
+                        cp_enable: "true"
+                        svc_enable: "false"
+                        vip_leaderelection: "true"
+                      nodeSelector:
+                        node-role.kubernetes.io/control-plane: "true"
+                      tolerations:
+                        - key: "node-role.kubernetes.io/control-plane"
+                          operator: "Exists"
+                          effect: "NoSchedule"
         selector:
           apiVersion: controlplane.cluster.x-k8s.io/v1beta1
-          kind: RKE2ControlPlaneTemplate
+          kind: RKE2ControlPlaneTemplate  # or KubeadmControlPlaneTemplate
+          matchResources:
+            controlPlane: true
 ```
 
-### Hook Architecture (v0.3.0+)
+**What this does:**
+1. Creates HelmChart manifest in `/var/lib/rancher/rke2/server/manifests/`
+2. RKE2 (or kubeadm) applies it during bootstrap
+3. kube-vip DaemonSet starts on control plane nodes
+4. kube-vip installs VIP on node network interface
+5. API server becomes accessible via VIP ✅
 
-The operator uses two synchronous hooks in sequence:
-
-#### 1. BeforeClusterCreate Hook (Phase 1 - VIP Allocation)
-
-1. **Executes BEFORE** Cluster is written to etcd (synchronous, blocking)
-2. **Allocates VIP** from IP pool (with retry, max 55s)
-3. **Creates IPAddressClaim** (without ownerReference - Cluster not in etcd yet)
-4. **Waits for IPAM** to allocate IP address
-5. **Sets VIP directly** in request object:
-   - `request.Cluster.Spec.ControlPlaneEndpoint.Host = "10.2.0.20"`
-6. **Returns success** to CAPI controller
-7. **Cluster created** in etcd with VIP already set ✅
-
-#### 2. GeneratePatches Hook (Phase 2 - Infrastructure Patching)
-
-1. **Executes AFTER** Cluster exists in etcd (synchronous, fast)
-2. **Reads VIP** from Cluster.Spec.ControlPlaneEndpoint.Host
-3. **Patches InfrastructureCluster** (e.g., ProxmoxCluster):
-   - `ProxmoxCluster.spec.controlPlaneEndpoint.host = "10.2.0.20"`
-4. **Returns patches** to CAPI controller
-5. **InfrastructureCluster created** with correct VIP ✅
-6. **Topology controller** renders other objects with `{{ .builtin.controlPlane.endpoint.host }}`
-
-**Why v0.3.0 is better than v0.2.x:**
-- ✅ **Two-phase synchronous** - BeforeClusterCreate allocates, GeneratePatches patches
-- ✅ **No reconcile loop** - eliminated async race condition
-- ✅ **InfrastructureCluster support** - GeneratePatches patches ProxmoxCluster correctly
-- ❌ **v0.2.x problem** - reconciler ran asynchronously, topology controller used empty VIP
-
-### InfrastructureClusterTemplate Configuration
-
-Your infrastructure cluster template should have **empty** host:
+### Complete ClusterClass Example
 
 ```yaml
-apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
-kind: ProxmoxClusterTemplate  # or your provider
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: ClusterClass
 metadata:
-  name: my-cluster-template
+  name: rke2-proxmox-class
 spec:
-  template:
-    spec:
-      controlPlaneEndpoint:
-        host: ""    # ✅ Empty - will be filled by operator's GeneratePatches hook
-        port: 6443  # ✅ Port can be static
+  # 1. Define clusterVip variable (REQUIRED!)
+  variables:
+    - name: clusterVip
+      required: false
+      schema:
+        openAPIV3Schema:
+          default: ""
+          description: "Control plane VIP (auto-allocated by capi-vip-allocator)"
+          type: string
+  
+  # 2. Use {{ .clusterVip }} in patches
+  patches:
+    # Patch InfrastructureCluster
+    - name: set-vip-on-proxmox-cluster
+      definitions:
+        - jsonPatches:
+            - op: replace
+              path: /spec/template/spec/controlPlaneEndpoint/host
+              valueFrom:
+                template: "{{ .clusterVip }}"
+          selector:
+            apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+            kind: ProxmoxClusterTemplate
+            matchResources:
+              infrastructureCluster: true
+    
+    # Patch ControlPlane for TLS SANs
+    - name: set-rke2-tlssan
+      definitions:
+        - jsonPatches:
+            - op: add
+              path: /spec/template/spec/serverConfig/tlsSAN/-
+              valueFrom:
+                template: "{{ .clusterVip }}"
+          selector:
+            apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+            kind: RKE2ControlPlaneTemplate
+            matchResources:
+              controlPlane: true
+    
+    # Install kube-vip (REQUIRED to install VIP on node!)
+    - name: install-kube-vip
+      definitions:
+        - jsonPatches:
+            - op: add
+              path: /spec/template/spec/files/-
+              valueFrom:
+                template: |
+                  path: /var/lib/rancher/rke2/server/manifests/kube-vip-apiserver.yaml
+                  permissions: "0644"
+                  content: |
+                    apiVersion: helm.cattle.io/v1
+                    kind: HelmChart
+                    metadata:
+                      name: kube-vip-apiserver
+                      namespace: kube-system
+                    spec:
+                      version: 0.8.2
+                      chart: kube-vip
+                      repo: https://kube-vip.github.io/helm-charts
+                      bootstrap: true
+                      valuesContent: |-
+                        config:
+                          address: '{{ .clusterVip }}'
+                        env:
+                          vip_interface: ""
+                          vip_arp: "true"
+                          cp_enable: "true"
+          selector:
+            apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+            kind: RKE2ControlPlaneTemplate
+            matchResources:
+              controlPlane: true
 ```
 
-The operator will automatically populate the `host` field for both Cluster and InfrastructureCluster objects.
+### Why Custom Variable Instead of Builtin?
+
+**❌ Cannot use `{{ .builtin.cluster.spec.controlPlaneEndpoint.host }}`:**
+- This builtin variable doesn't exist in CAPI
+
+**❌ Cannot use `{{ .builtin.controlPlane.endpoint.host }}`:**
+- Circular dependency: ControlPlane object is created **AFTER** InfrastructureCluster
+- Value is empty during InfrastructureCluster creation
+
+**✅ Custom variable `{{ .clusterVip }}` works:**
+- Reconcile controller sets it **BEFORE** topology reconcile
+- Available immediately for all patches
+- No circular dependency!
 
 ## Troubleshooting
 
-### ExtensionConfig not found
-
-```
-Error: no matches for kind "ExtensionConfig"
-```
-
-**Solution:** Enable RuntimeSDK in CAPI controller (see Prerequisites).
-
 ### VIP not allocated
 
-Check:
+Check the following:
 
-1. **RuntimeSDK enabled:**
+1. **Operator is running:**
    ```bash
-   kubectl logs -n capi-system -l control-plane=controller-manager | grep "Runtime SDK"
+   kubectl get pods -n capi-system -l control-plane=capi-vip-allocator-controller-manager
    ```
 
-2. **IP pool exists:**
+2. **IP pool exists with correct labels:**
    ```bash
    kubectl get globalinclusterippool -l vip.capi.gorizond.io/cluster-class=YOUR_CLASS
    ```
@@ -320,23 +459,31 @@ Check:
 3. **Pool has free IPs:**
    ```bash
    kubectl get globalinclusterippool POOL_NAME -o jsonpath='{.status.ipAddresses}'
+   # Should show: {"free":9,"total":11,"used":2}
    ```
 
-4. **Extension logs:**
+4. **Check operator logs:**
    ```bash
    kubectl logs -n capi-system -l control-plane=capi-vip-allocator-controller-manager -f
+   
+   # Should see:
+   # INFO controllers.Cluster controlPlaneEndpoint not set, controller will allocate VIP
+   # INFO controllers.Cluster control-plane VIP assigned ip=10.0.0.15
    ```
 
-### Certificate not ready
+5. **Check IPAddressClaim:**
+   ```bash
+   kubectl get ipaddressclaim -n YOUR_NAMESPACE
+   kubectl get ipaddress -n YOUR_NAMESPACE
+   ```
 
-```bash
-kubectl describe certificate capi-vip-allocator-runtime-extension-cert -n capi-system
+### ClusterClass missing `clusterVip` variable
+
+```
+Error: ClusterClass variable 'clusterVip' not found
 ```
 
-Check cert-manager:
-```bash
-kubectl get pods -n cert-manager
-```
+**Solution:** Add `clusterVip` variable to ClusterClass (see [Step 1](#step-1-define-clustervip-variable)).
 
 ### InfrastructureCluster validation error
 
@@ -346,59 +493,85 @@ FieldValueInvalid: spec.controlplaneEndpoint:
 Invalid value: "<no value>": provided endpoint address is not a valid IP or FQDN
 ```
 
-**Причина:** Race condition - ClusterClass патч пытается скопировать `Cluster.spec.controlPlaneEndpoint.host` до того, как оператор выделит VIP.
+**Cause:** ClusterClass patch uses wrong variable or builtin.
 
-**Решение:**
+**Solution:** Use `{{ .clusterVip }}` in your patch (see [Step 2](#step-2-use--clustervip--in-patches)).
 
-1. **Удалите конфликтующий патч** из ClusterClass:
-   ```yaml
-   # Удалить патч, который копирует .builtin.cluster.spec.controlPlaneEndpoint.host
-   # в InfrastructureCluster
-   ```
+### VIP allocated but not accessible
 
-2. **Используйте правильный синтаксис** для других патчей:
-   ```yaml
-   # ✅ Правильно - использует .builtin.controlPlane.endpoint
-   valueFrom:
-     template: "{{ .builtin.controlPlane.endpoint.host }}"
-   
-   # ❌ Неправильно - использует .builtin.cluster.spec
-   valueFrom:
-     template: "{{ .builtin.cluster.spec.controlPlaneEndpoint.host }}"
-   ```
+```bash
+# Check if VIP is set in Cluster
+kubectl get cluster my-cluster -o jsonpath='{.spec.controlPlaneEndpoint.host}'
+# Returns: 10.0.0.15 ✅
 
-3. **Проверьте логи** оператора:
-   ```bash
-   kubectl logs -n capi-system -l control-plane=capi-vip-allocator-controller-manager -f
-   ```
+# But API not accessible via VIP
+curl -k https://10.0.0.15:6443/version
+# Connection refused ❌
+```
 
-См. раздел [ClusterClass Integration](#clusterclass-integration) для подробностей.
+**Cause:** kube-vip is not installed in the workload cluster.
 
-## Architecture (v0.3.0+)
+**Solution:** Add kube-vip HelmChart patch to ClusterClass (see [kube-vip integration](#step-3-kube-vip-integration)).
+
+**Verify kube-vip is running:**
+```bash
+# SSH to control plane node
+kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get pods -n kube-system | grep kube-vip
+# Should show: kube-vip-apiserver-xxxxx  1/1  Running
+
+# Check VIP is installed on interface
+ip addr show ens18
+# Should show: inet 10.0.0.15/32 scope global ens18
+```
+
+## Architecture (v0.5.0)
 
 ### Components
 
-- **Runtime Extension Server** - HTTP server (port 9443) handling CAPI hooks
-- **BeforeClusterCreate Hook** - Allocates VIP synchronously BEFORE Cluster creation (ONLY source)
+- **Reconcile Controller** - Watches Cluster resources with topology, allocates VIP before topology reconcile
 - **IPAM Integration** - Creates/manages IPAddressClaim resources
+- **Custom Variable** - Writes VIP to `Cluster.spec.topology.variables[clusterVip]`
 - **ownerReferences** - Automatic cleanup when Cluster is deleted
-
-### Removed in v0.3.0
-
-- **GeneratePatches Hook** - Removed to prevent race condition (ran after topology controller)
-- **Reconciler Controller** - Disabled by default (created async race condition)
+- **Runtime Extension** (optional, deprecated) - Kept for backward compatibility
 
 ### Resource Flow
 
 ```
-Cluster (topology.class) 
-  → Runtime Extension finds GlobalInClusterIPPool (by labels)
-    → Creates IPAddressClaim (with ownerReference to Cluster)
-      → IPAM allocates IPAddress
-        → Extension returns patch with IP
-          → Cluster.spec.controlPlaneEndpoint.host set
-            → InfrastructureCluster created with valid endpoint
+User creates Cluster
+  ↓
+Reconcile Controller watches
+  ├─ Finds GlobalInClusterIPPool (by ClusterClass labels)
+  ├─ Creates IPAddressClaim (with ownerReference)
+  ├─ Waits for IPAM to allocate IPAddress
+  └─ Patches Cluster:
+     ├─ spec.controlPlaneEndpoint.host = VIP
+     └─ spec.topology.variables[clusterVip] = VIP
+  ↓
+Topology Controller reconciles
+  ├─ Reads clusterVip variable
+  ├─ Applies ClusterClass inline patches
+  └─ Creates InfrastructureCluster with VIP
+  ↓
+ControlPlane bootstrap
+  ├─ Applies HelmChart manifest (kube-vip)
+  └─ kube-vip installs VIP on node interface
+  ↓
+API server accessible via VIP ✅
 ```
+
+### Why v0.5.0 Architecture?
+
+**v0.2.x - v0.4.x attempts failed:**
+
+- ❌ **v0.2.x**: Reconcile controller ran async → race condition
+- ❌ **v0.3.x**: BeforeClusterCreate hook → cannot modify Cluster object
+- ❌ **v0.4.x**: GeneratePatches external patch → limited to `spec.template.spec` fields
+- ❌ **Builtin variables**: Circular dependency (ControlPlane created after InfrastructureCluster)
+
+**✅ v0.5.0 solution:**
+- Reconcile controller runs **before** topology reconcile
+- Custom variable `clusterVip` breaks circular dependency
+- kube-vip handles VIP installation (not the operator)
 
 ## Development
 
@@ -412,15 +585,18 @@ make test
 # Build Docker image
 make docker-build TAG=dev
 
-# Run locally
+# Run locally (v0.5.0)
 go run ./cmd/capi-vip-allocator \
-  --enable-runtime-extension=true \
-  --runtime-extension-port=9443
+  --enable-reconciler=true \
+  --enable-runtime-extension=false \
+  --default-port=6443
 ```
 
 ## Roadmap
 
-- [x] Control-plane VIP allocation via Runtime Extension
+- [x] Control-plane VIP allocation via reconcile controller
+- [x] Custom variable integration with ClusterClass
+- [x] kube-vip integration example
 - [ ] Ingress VIP support (annotation-based)
 - [ ] Prometheus metrics
 - [ ] Events and Conditions
