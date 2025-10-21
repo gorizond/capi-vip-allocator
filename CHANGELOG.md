@@ -2,6 +2,69 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.7.1] - 2025-10-21
+
+### 🚀 New Feature: Annotation-based ClusterClass Matching
+
+**Support for cluster class names longer than 63 characters!**
+
+Kubernetes labels are limited to 63 characters, which can be problematic for auto-generated or namespaced ClusterClass names. This release adds support for annotation-based matching as an alternative.
+
+### Added
+
+- **Annotation-based ClusterClass matching** - Bypass Kubernetes label length limit
+  - If `vip.capi.gorizond.io/cluster-class` label is set to `"true"`, operator reads cluster class names from annotation
+  - Annotation `vip.capi.gorizond.io/cluster-class` supports comma-separated list of cluster class names
+  - No length restriction (annotations support up to 256KB)
+  - Maintains **full backward compatibility** with label-based matching
+
+### Configuration Example
+
+```yaml
+# Before v0.7.1: Label length limited to 63 characters
+apiVersion: ipam.cluster.x-k8s.io/v1alpha2
+kind: GlobalInClusterIPPool
+metadata:
+  name: vip-pool
+  labels:
+    vip.capi.gorizond.io/cluster-class: "short-name-1,short-name-2"  # ❌ Fails if > 63 chars
+    vip.capi.gorizond.io/role: "control-plane"
+
+# After v0.7.1: Use annotation for long names
+apiVersion: ipam.cluster.x-k8s.io/v1alpha2
+kind: GlobalInClusterIPPool
+metadata:
+  name: vip-pool
+  labels:
+    vip.capi.gorizond.io/cluster-class: "true"  # ✅ Enable annotation mode
+    vip.capi.gorizond.io/role: "control-plane"
+  annotations:
+    # ✅ No length limit! Supports very long names
+    vip.capi.gorizond.io/cluster-class: "very-long-cluster-class-name-that-exceeds-63-characters,another-long-name,rke2-proxmox-with-long-suffix"
+```
+
+### Benefits
+
+- ✅ **No more 63-character limit** for cluster class names
+- ✅ **Backward compatible** - existing label-based pools still work
+- ✅ **Flexible** - mix label-based and annotation-based pools in same cluster
+- ✅ **Comma-separated lists** still supported in annotations
+
+### Changed
+
+- Updated `findPool()` function to check for `cluster-class: "true"` label
+- When label is `"true"`, reads cluster class names from annotation
+- Falls back to label-based matching if label is not `"true"`
+
+### Migration
+
+**No migration needed!** This is a backward-compatible addition:
+- Existing pools with label-based matching continue to work
+- New pools can use annotation-based matching if needed
+- Both modes can coexist in the same cluster
+
+---
+
 ## [v0.7.0] - 2025-10-20
 
 ### 🚀 New Feature: Prometheus Metrics

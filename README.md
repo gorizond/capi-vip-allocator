@@ -132,9 +132,10 @@ spec:
 **Label matching:**
 - Supports **exact match**: `cluster-class: my-cluster-class`
 - Supports **comma-separated values**: `cluster-class: "class1,class2,class3"`
+- Supports **annotation-based** (for long names > 63 chars): `cluster-class: "true"` + annotation
 - Supports **both labels**: `role: "control-plane,ingress"` (shared pool)
 
-Example with multiple cluster classes:
+Example with multiple cluster classes (label-based):
 
 ```yaml
 apiVersion: ipam.cluster.x-k8s.io/v1alpha2
@@ -152,6 +153,33 @@ spec:
   gateway: "10.0.0.1"
   prefix: 24
 ```
+
+Example with annotation (for long cluster class names):
+
+```yaml
+apiVersion: ipam.cluster.x-k8s.io/v1alpha2
+kind: GlobalInClusterIPPool
+metadata:
+  name: long-names-vip-pool
+  labels:
+    # Set to "true" to enable annotation-based matching
+    vip.capi.gorizond.io/cluster-class: "true"
+    vip.capi.gorizond.io/role: "control-plane"
+  annotations:
+    # Annotation supports names longer than 63 characters
+    vip.capi.gorizond.io/cluster-class: "very-long-cluster-class-name-that-exceeds-kubernetes-label-63-character-limit,another-very-long-name,rke2-proxmox-with-some-very-long-suffix-that-makes-it-too-long-for-label"
+spec:
+  addresses:
+    - "10.0.0.10-10.0.0.20"
+  gateway: "10.0.0.1"
+  prefix: 24
+```
+
+**Why annotation-based matching?**
+- Kubernetes labels are limited to **63 characters**
+- Annotations have **no such limit** (up to 256KB)
+- Useful for auto-generated long ClusterClass names
+- Maintains backward compatibility (label-based matching still works)
 
 ### Create Cluster
 
@@ -210,10 +238,16 @@ kubectl logs -n capi-system -l control-plane=capi-vip-allocator-controller-manag
 
 ### IP Pool Selection
 
-The operator finds pools using labels:
+The operator finds pools using labels (with optional annotation for long names):
 
-- `vip.capi.gorizond.io/cluster-class: <clusterClassName>`
+**Standard mode (label-based):**
+- `vip.capi.gorizond.io/cluster-class: <clusterClassName>` (exact or comma-separated)
 - `vip.capi.gorizond.io/role: control-plane`
+
+**Annotation mode (for long cluster class names > 63 chars):**
+- `vip.capi.gorizond.io/cluster-class: "true"` (label)
+- `vip.capi.gorizond.io/cluster-class: <clusterClassName1>,<clusterClassName2>,...` (annotation)
+- `vip.capi.gorizond.io/role: control-plane` (label)
 
 ### Manual VIP Override
 

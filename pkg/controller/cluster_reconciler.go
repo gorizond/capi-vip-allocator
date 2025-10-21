@@ -22,19 +22,21 @@ import (
 )
 
 const (
-	controlPlaneRole         = "control-plane"
-	ingressRole              = "ingress"
-	clusterClassLabel        = "vip.capi.gorizond.io/cluster-class"
-	roleLabel                = "vip.capi.gorizond.io/role"
-	ingressEnabledAnnotation = "vip.capi.gorizond.io/ingress-enabled"
-	ingressVipAnnotation     = "vip.capi.gorizond.io/ingress-vip"
-	ipamGroup                = "ipam.cluster.x-k8s.io"
-	ipamVersion              = "v1beta1"  // for IPAddressClaim and IPAddress
-	globalPoolAPIVersion     = "v1alpha2" // for GlobalInClusterIPPool
-	globalPoolKind           = "GlobalInClusterIPPool"
-	ipAddressClaimKind       = "IPAddressClaim"
-	ipAddressKind            = "IPAddress"
-	defaultRequeueDelay      = 10 * time.Second
+	controlPlaneRole          = "control-plane"
+	ingressRole               = "ingress"
+	clusterClassLabel         = "vip.capi.gorizond.io/cluster-class"
+	clusterClassAnnotation    = "vip.capi.gorizond.io/cluster-class"
+	roleLabel                 = "vip.capi.gorizond.io/role"
+	ingressEnabledAnnotation  = "vip.capi.gorizond.io/ingress-enabled"
+	ingressVipAnnotation      = "vip.capi.gorizond.io/ingress-vip"
+	ipamGroup                 = "ipam.cluster.x-k8s.io"
+	ipamVersion               = "v1beta1"  // for IPAddressClaim and IPAddress
+	globalPoolAPIVersion      = "v1alpha2" // for GlobalInClusterIPPool
+	globalPoolKind            = "GlobalInClusterIPPool"
+	ipAddressClaimKind        = "IPAddressClaim"
+	ipAddressKind             = "IPAddress"
+	defaultRequeueDelay       = 10 * time.Second
+	clusterClassLabelTrueFlag = "true"
 )
 
 // ClusterReconciler reconciles Cluster resources to ensure a control-plane VIP is allocated.
@@ -226,22 +228,38 @@ func (r *ClusterReconciler) findPool(ctx context.Context, className, role string
 	pools.SetGroupVersionKind(poolListGVK)
 
 	// List all GlobalInClusterIPPool resources without label filtering
-	// We'll filter them manually to support comma-separated values
+	// We'll filter them manually to support comma-separated values and annotation-based class names
 	if err := r.Client.List(ctx, pools); err != nil {
 		return "", fmt.Errorf("list %s: %w", globalPoolKind, err)
 	}
 
-	// Find a pool that matches both className and role (supporting comma-separated values)
+	// Find a pool that matches both className and role (supporting comma-separated values and annotations)
 	for _, pool := range pools.Items {
 		labels := pool.GetLabels()
+		annotations := pool.GetAnnotations()
 
-		// Check if cluster-class label matches (exact or comma-separated)
+		// Check if cluster-class label matches (exact, comma-separated, or annotation-based)
 		classLabel, classExists := labels[clusterClassLabel]
 		if !classExists {
 			continue
 		}
-		if !labelContainsValue(classLabel, className) {
-			continue
+
+		// NEW LOGIC: If label value is "true", read cluster classes from annotation
+		if classLabel == clusterClassLabelTrueFlag {
+			classAnnotation, annotationExists := annotations[clusterClassAnnotation]
+			if !annotationExists {
+				// Label is "true" but no annotation found - skip this pool
+				continue
+			}
+			// Check if annotation contains our className (comma-separated list)
+			if !labelContainsValue(classAnnotation, className) {
+				continue
+			}
+		} else {
+			// OLD LOGIC: Label contains cluster class name(s) directly
+			if !labelContainsValue(classLabel, className) {
+				continue
+			}
 		}
 
 		// Check if role label matches (exact or comma-separated)
